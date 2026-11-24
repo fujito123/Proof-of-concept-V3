@@ -938,7 +938,7 @@ export function renderMissionPage(slug) {
               <p class="muted" style="margin-bottom:12px;" dir="auto"><strong>Criterion:</strong> \${esc(h.criterion)}</p>
               <div class="row">
                 <button class="chip-btn" onclick="copyHelpPrompt('\${esc(h.id)}')">Copy AI Prompt</button>
-                <a class="btn secondary" style="padding:6px 12px; font-size:12.5px;" href="/invite#poc_open_invite_demo">Solve &amp; Submit</a>
+                <a class="btn secondary" style="padding:6px 12px; font-size:12.5px;" href="/invite?mission_id=\${encodeURIComponent(mission.id)}&help_id=\${encodeURIComponent(h.id)}#poc_open_invite_demo">Solve &amp; Submit</a>
               </div>
             </div>
           \`).join('') || '<div class="card muted-card"><p class="muted" style="margin:0;">No items in this tab.</p></div>'}
@@ -1094,6 +1094,25 @@ export function renderInvitePage() {
         </div>
         <button id="draw-btn" onclick="drawTask()">Get a Research Task</button>
         <div id="draw-msg"></div>
+
+        <details style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
+          <summary style="cursor:pointer; font-weight:700; color:var(--primary);">Connect My Agent (Zero Copy-Paste Mode)</summary>
+          <p class="muted" style="margin:8px 0;">Connect ChatGPT (Custom GPT Actions), Claude, or any HTTP/OpenAPI agent once using the details below. After connecting, just tell your AI: <em>"Draw and solve an open Proof Commons task"</em> — no copy-paste needed.</p>
+          <div style="display:grid; gap:8px; font-size:13px;">
+            <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+              <span><strong>OpenAPI Schema URL:</strong> <code id="agent-openapi-url"></code></span>
+              <button type="button" class="chip-btn" onclick="copyTextEl('agent-openapi-url')">Copy</button>
+            </div>
+            <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+              <span><strong>Bearer Token:</strong> <code id="agent-bearer-token"></code></span>
+              <button type="button" class="chip-btn" onclick="copyTextEl('agent-bearer-token')">Copy</button>
+            </div>
+            <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+              <span><strong>Unified Agent Endpoint:</strong> <code id="agent-rpc-url"></code></span>
+              <button type="button" class="chip-btn" onclick="copyTextEl('agent-rpc-url')">Copy</button>
+            </div>
+          </div>
+        </details>
       </div>
 
       <div id="assignment-box" class="card accent-card hidden">
@@ -1108,7 +1127,9 @@ export function renderInvitePage() {
         <div id="a-evidence"></div>
 
         <div class="row" style="margin:16px 0; padding:12px; background:var(--primary-soft); border-radius:12px; border:1px solid var(--primary-border);">
-          <button onclick="copyAiPrompt()">Copy 1-Click Prompt for Your AI</button>
+          <button type="button" onclick="openInChatGPT()">Open in ChatGPT</button>
+          <button type="button" onclick="openInClaude()">Open in Claude</button>
+          <button type="button" class="secondary" onclick="copyAiPrompt()">Copy Prompt</button>
           <span id="copy-msg" class="muted" style="font-weight:700; color:var(--primary);"></span>
         </div>
 
@@ -1129,6 +1150,9 @@ export function renderInvitePage() {
     <script>
       let inviteToken = '';
       let activeAssignment = null;
+      const urlParams = new URLSearchParams(window.location.search);
+      const requestedMissionId = urlParams.get('mission_id') || '';
+      const requestedHelpId = urlParams.get('help_id') || '';
       const sessionId = localStorage.getItem('pc_session_id') || (() => {
         const id = 'agent_' + Math.random().toString(36).slice(2, 10);
         localStorage.setItem('pc_session_id', id);
@@ -1140,12 +1164,18 @@ export function renderInvitePage() {
         exchangeInvite();
       }
 
+      function copyTextEl(id) {
+        const val = document.getElementById(id)?.textContent || '';
+        navigator.clipboard?.writeText(val);
+        if (typeof showToast === 'function') showToast('Copied to clipboard!');
+      }
+
       function init() {
         const hash = window.location.hash.replace(/^#/, '').trim();
         if (hash) {
           inviteToken = hash;
           document.getElementById('inv-token').value = hash;
-          try { history.replaceState(null, '', '/invite'); } catch (e) {}
+          try { history.replaceState(null, '', '/invite' + window.location.search); } catch (e) {}
           exchangeInvite();
         }
       }
@@ -1171,14 +1201,23 @@ export function renderInvitePage() {
         document.getElementById('workspace').classList.remove('hidden');
         document.getElementById('inv-label').textContent = data.invite.label;
         document.getElementById('inv-quota').textContent = (data.invite.quota_total - data.invite.quota_used) + ' contributions left';
+        document.getElementById('agent-openapi-url').textContent = location.origin + '/openapi.json';
+        document.getElementById('agent-bearer-token').textContent = inviteToken;
+        document.getElementById('agent-rpc-url').textContent = location.origin + '/v1/agent';
+
         const sel = document.getElementById('w-mission');
         sel.innerHTML = data.missions.map(m => '<option value="' + esc(m.id) + '">' + esc(m.title) + ' (' + (m.open_help_count || 0) + ' open)</option>').join('');
-        if (data.active_assignment) {
+        if (requestedMissionId && Array.from(sel.options).some(o => o.value === requestedMissionId)) {
+          sel.value = requestedMissionId;
+        }
+        if (requestedHelpId) {
+          drawTask(requestedHelpId);
+        } else if (data.active_assignment) {
           showAssignment(data.active_assignment);
         }
       }
 
-      async function drawTask() {
+      async function drawTask(specificHelpId = null) {
         const msg = document.getElementById('draw-msg');
         if (msg) msg.innerHTML = '';
         const res = await fetch('/api/invite/draw', {
@@ -1187,6 +1226,7 @@ export function renderInvitePage() {
           body: JSON.stringify({
             token: inviteToken,
             mission_id: document.getElementById('w-mission').value,
+            help_request_id: typeof specificHelpId === 'string' ? specificHelpId : undefined,
             model_family: document.getElementById('w-model').value,
             agent_session: sessionId
           })
@@ -1212,7 +1252,11 @@ export function renderInvitePage() {
         const evEl = document.getElementById('a-evidence');
         if (a.prior_claims && a.prior_claims.length) {
           evEl.innerHTML = '<h3>Prior Context</h3>' + a.prior_claims.map(c =>
-            '<div class="card muted-card"><span class="badge">' + esc(c.verification_status) + '</span><div class="finding-box" style="margin-top:8px;" dir="auto">' + esc(c.finding.slice(0, 800)) + '</div></div>'
+            '<div class="card muted-card"><span class="badge">' + esc(c.verification_status) + '</span>' +
+            '<div class="finding-box" style="margin-top:8px;" dir="auto">' + esc(c.finding.slice(0, 800)) + '</div>' +
+            (c.how_to_check ? '<div class="muted" style="margin-top:6px;"><strong>How to check:</strong> ' + esc(c.how_to_check.slice(0, 300)) + '</div>' : '') +
+            (c.remaining_gap ? '<div class="muted" style="margin-top:4px;"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap.slice(0, 300)) + '</div>' : '') +
+            '</div>'
           ).join('');
         } else {
           evEl.innerHTML = '';
@@ -1222,18 +1266,35 @@ export function renderInvitePage() {
         document.getElementById('a-input').oninput = (e) => localStorage.setItem(draftKey, e.target.value);
       }
 
-      function copyAiPrompt() {
-        if (!activeAssignment) return;
-        const text = [
-          'Help solve this Proof Commons research task:',
+      function buildAiPrompt() {
+        if (!activeAssignment) return '';
+        return [
+          'Work one Proof Commons research assignment (run_id: ' + activeAssignment.id + ').',
           'Title: ' + activeAssignment.title,
           'Question: ' + activeAssignment.question,
-          'Criterion: ' + activeAssignment.criterion,
-          'Reply in clear Markdown (including Findings, Assumptions, How to Check, Remaining Gap, and References).'
+          'Success Criterion: ' + activeAssignment.criterion,
+          'Instructions: If this task is computational or verifiable, write and execute verification code and state the exact verified output — do not guess. Reply in clear Markdown with sections: Findings, Assumptions, How to Check, Remaining Gap, and References (or use outcome=partial/blocked if incomplete).'
         ].join('\\n\\n');
+      }
+
+      function copyAiPrompt() {
+        const text = buildAiPrompt();
+        if (!text) return;
         navigator.clipboard?.writeText(text);
         document.getElementById('copy-msg').textContent = 'Copied to clipboard!';
         if (typeof showToast === 'function') showToast('1-Click AI Prompt copied!');
+      }
+
+      function openInChatGPT() {
+        const text = buildAiPrompt();
+        if (!text) return;
+        window.open('https://chatgpt.com/?q=' + encodeURIComponent(text), '_blank', 'noopener');
+      }
+
+      function openInClaude() {
+        const text = buildAiPrompt();
+        if (!text) return;
+        window.open('https://claude.ai/new?q=' + encodeURIComponent(text), '_blank', 'noopener');
       }
 
       async function submitAnswer() {

@@ -103,16 +103,88 @@ export default {
         return html(renderMissionPage(slug));
       }
 
-      // --- OpenAPI 3.1 Spec for tool-connected agents ---
+      // --- OpenAPI 3.1 Spec for tool-connected agents (ChatGPT Actions, MCP, HTTP tools) ---
       if (method === "GET" && path === "/openapi.json") {
         return json({
           openapi: "3.1.0",
-          info: { title: "Proof Commons Agent API", version: "2.1.0" },
+          info: {
+            title: "Proof Commons Agent API",
+            version: "2.2.0",
+            description: "Connect an AI agent directly to Proof Commons to browse missions, draw open research tasks, and submit verified findings without copy-paste.",
+          },
+          servers: [{ url: url.origin }],
+          security: [{ bearerAuth: [] }],
+          components: {
+            securitySchemes: {
+              bearerAuth: {
+                type: "http",
+                scheme: "bearer",
+                description: "Invitation token (e.g. poc_open_invite_demo)",
+              },
+            },
+            schemas: {
+              DrawRequest: {
+                type: "object",
+                properties: {
+                  mission_id: { type: "string", description: "Optional mission ID or slug" },
+                  help_request_id: { type: "string", description: "Optional specific help request ID to draw" },
+                  model_family: { type: "string", description: "Model family (e.g. GPT, Claude, Gemini)" },
+                  agent_session: { type: "string", description: "Optional caller session ID" },
+                },
+              },
+              HandoffRequest: {
+                type: "object",
+                required: ["finding"],
+                properties: {
+                  outcome: { type: "string", enum: ["candidate_answer", "partial", "counterexample", "reframe", "blocked"], default: "candidate_answer" },
+                  finding: { type: "string", description: "Main finding, proof, or verified result in Markdown" },
+                  how_to_check: { type: "string", description: "Verification steps or self-contained script" },
+                  assumptions: { type: "string", description: "Explicit assumptions made" },
+                  remaining_gap: { type: "string", description: "What remains open or unverified" },
+                  references_text: { type: "string", description: "Citations, DOIs, arXiv or OEIS links" },
+                  follow_up_question: { type: "string", description: "Optional follow-up question for another model" },
+                },
+              },
+            },
+          },
           paths: {
+            "/api/agent/v1/missions": {
+              get: {
+                operationId: "listMissions",
+                summary: "List active missions and their open help requests",
+                responses: { "200": { description: "List of active missions and open help requests" } },
+              },
+            },
+            "/api/agent/v1/draw": {
+              post: {
+                operationId: "drawTask",
+                summary: "Draw an open research help request to work on",
+                requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/DrawRequest" } } } },
+                responses: { "200": { description: "Assigned run with full question, criterion, and prior claims" } },
+              },
+            },
+            "/api/agent/v1/runs/{run_id}/open": {
+              post: {
+                operationId: "openAssignment",
+                summary: "Open an existing assigned run and inspect its brief and prior evidence",
+                parameters: [{ name: "run_id", in: "path", required: true, schema: { type: "string" } }],
+                responses: { "200": { description: "Assignment brief and prior evidence" } },
+              },
+            },
+            "/api/agent/v1/runs/{run_id}/handoff": {
+              post: {
+                operationId: "submitHandoff",
+                summary: "Submit findings for an assigned run and receive a durable receipt",
+                parameters: [{ name: "run_id", in: "path", required: true, schema: { type: "string" } }],
+                requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/HandoffRequest" } } } },
+                responses: { "200": { description: "Submission receipt with claim_id and receipt_url" } },
+              },
+            },
             "/v1/agent": {
               post: {
-                summary: "Draw help requests, submit findings (Markdown or JSON), request cross-model help, or review claims.",
-                security: [{ bearerAuth: [] }],
+                operationId: "agentRpc",
+                summary: "Unified single-endpoint agent action (list_missions, draw_task, open_assignment, submit_handoff, request_help).",
+                responses: { "200": { description: "Action result" } },
               },
             },
           },
@@ -265,34 +337,39 @@ export default {
         const modelFamily = String(body.model_family || "Other");
         const agentSession = String(body.agent_session || uid("sess"));
 
-        // Smart draw: pick open help_request (never re-draw already answered/done),
-        // prioritizing requests from a DIFFERENT model family when prefer_different_model = 1
-        const helpReq = await env.DB.prepare(`
-          SELECT * FROM help_requests
-          WHERE mission_id = ? AND status = 'open'
-          ORDER BY
-            CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END,
-            created_at ASC
-          LIMIT 1
-        `).bind(missionId, modelFamily).first();
+        const requestedHelpId = body.help_request_id ? String(body.help_request_id).trim() : null;
+
+        // Smart draw: if a specific open help_request_id is requested, use it;
+        // otherwise pick an open help_request prioritizing a DIFFERENT model family.
+        const helpReq = requestedHelpId
+          ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
+          : await env.DB.prepare(`
+              SELECT * FROM help_requests
+              WHERE mission_id = ? AND status = 'open'
+              ORDER BY
+                CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END,
+                created_at ASC
+              LIMIT 1
+            `).bind(missionId, modelFamily).first();
 
         if (!helpReq) {
           return json({ error: "No open help requests in this mission right now. You can propose a new strategy or post a help request on the mission page." }, 404);
         }
 
+        const resolvedMissionId = helpReq.mission_id || missionId;
         const assignId = uid("assign");
         await env.DB.prepare(
           `INSERT INTO assignments (id, invite_token, mission_id, help_request_id, model_family, agent_session) VALUES (?, ?, ?, ?, ?, ?)`
-        ).bind(assignId, invite.token, missionId, helpReq.id, modelFamily, agentSession).run();
+        ).bind(assignId, invite.token, resolvedMissionId, helpReq.id, modelFamily, agentSession).run();
 
         const { results: prior_claims } = await env.DB.prepare(
-          `SELECT id, outcome, finding, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
-        ).bind(missionId).all();
+          `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
+        ).bind(resolvedMissionId).all();
 
         return json({
           assignment: {
             id: assignId,
-            mission_id: missionId,
+            mission_id: resolvedMissionId,
             help_request_id: helpReq.id,
             kind: helpReq.kind,
             title: helpReq.title,
@@ -381,69 +458,209 @@ export default {
         return json({ ok: true });
       }
 
-      // --- Unified /v1/agent Bearer Endpoint ---
-      if (method === "POST" && path === "/v1/agent") {
+      // --- Versioned REST Agent API (/api/agent/v1/*) + Unified /v1/agent ---
+      if (path.startsWith("/api/agent/v1/") || (method === "POST" && path === "/v1/agent")) {
         const auth = request.headers.get("Authorization") || "";
         const token = auth.replace(/^Bearer\s+/i, "").trim();
         const invite = await env.DB.prepare(`SELECT * FROM invites WHERE token = ?`).bind(token).first();
         if (!invite) return json({ error: "Unauthorized Bearer token" }, 401);
 
-        const body = await request.json();
-        const action = body.action;
+        const listMissionsForAgent = async () => {
+          const { results: missions } = await env.DB.prepare(`
+            SELECT m.id, m.slug, m.title, m.domain, m.question, m.criterion
+            FROM missions m
+            WHERE (? IS NULL OR m.id = ?) AND m.status = 'active'
+            ORDER BY m.created_at DESC
+          `).bind(invite.mission_id, invite.mission_id).all();
+          const { results: open_help_requests } = await env.DB.prepare(`
+            SELECT id, mission_id, strategy_id, kind, title, question, criterion, prefer_different_model, requested_by_model
+            FROM help_requests
+            WHERE status = 'open' AND (? IS NULL OR mission_id = ?)
+            ORDER BY created_at ASC
+          `).bind(invite.mission_id, invite.mission_id).all();
+          return { missions, open_help_requests };
+        };
 
-        if (action === "open_assignment") {
-          const assign = await env.DB.prepare(`SELECT * FROM assignments WHERE id = ? AND invite_token = ?`).bind(body.run_id, token).first();
+        const drawForAgent = async (params) => {
+          if (invite.quota_used >= invite.quota_total) {
+            return json({ error: "Invitation contribution quota reached." }, 403);
+          }
+          const modelFamily = String(params.model_family || "Other");
+          const agentSession = String(params.agent_session || uid("sess"));
+          let missionId = params.mission_id || invite.mission_id || null;
+          if (missionId) {
+            const m = await env.DB.prepare(`SELECT id FROM missions WHERE id = ? OR slug = ?`).bind(missionId, missionId).first();
+            if (m) missionId = m.id;
+          }
+          const requestedHelpId = params.help_request_id ? String(params.help_request_id).trim() : null;
+          const helpReq = requestedHelpId
+            ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
+            : missionId
+              ? await env.DB.prepare(`
+                  SELECT * FROM help_requests
+                  WHERE mission_id = ? AND status = 'open'
+                  ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
+                  LIMIT 1
+                `).bind(missionId, modelFamily).first()
+              : await env.DB.prepare(`
+                  SELECT * FROM help_requests
+                  WHERE status = 'open'
+                  ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
+                  LIMIT 1
+                `).bind(modelFamily).first();
+
+          if (!helpReq) return json({ error: "No open help requests available." }, 404);
+          const resolvedMissionId = helpReq.mission_id;
+          const assignId = uid("assign");
+          await env.DB.prepare(
+            `INSERT INTO assignments (id, invite_token, mission_id, help_request_id, model_family, agent_session) VALUES (?, ?, ?, ?, ?, ?)`
+          ).bind(assignId, invite.token, resolvedMissionId, helpReq.id, modelFamily, agentSession).run();
+
+          const mission = await env.DB.prepare(`SELECT id, slug, title, question, criterion, domain FROM missions WHERE id = ?`).bind(resolvedMissionId).first();
+          const { results: prior_claims } = await env.DB.prepare(
+            `SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
+          ).bind(resolvedMissionId).all();
+
+          return json({
+            run_id: assignId,
+            mission,
+            help_request: helpReq,
+            prior_claims,
+          });
+        };
+
+        const openRunForAgent = async (runId) => {
+          const assign = await env.DB.prepare(`SELECT * FROM assignments WHERE id = ? AND invite_token = ?`).bind(runId, token).first();
           if (!assign) return json({ error: "Assignment not found" }, 404);
           const helpReq = assign.help_request_id
             ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
             : null;
           const mission = await env.DB.prepare(`SELECT * FROM missions WHERE id = ?`).bind(assign.mission_id).first();
           const { results: evidence } = await env.DB.prepare(`SELECT * FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 10`).bind(assign.mission_id).all();
-          return json({ run_id: assign.id, mission, help_request: helpReq, evidence });
-        }
+          return json({ run_id: assign.id, status: assign.status, mission, help_request: helpReq, evidence });
+        };
 
-        if (action === "request_help") {
-          const id = uid("help");
-          await env.DB.prepare(
-            `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-          )
-            .bind(
-              id,
-              body.mission_id || invite.mission_id,
-              body.strategy_id || null,
-              body.target_claim_id || null,
-              body.kind || "verify",
-              String(body.title || "Cross-model help request").trim(),
-              String(body.question || "").trim(),
-              String(body.criterion || "Provide a clear check or counterexample.").trim(),
-              body.model_family || "Other",
-              body.agent_session || token
-            )
-            .run();
-          return json({ help_request_id: id }, 201);
-        }
-
-        if (action === "submit_handoff" || action === "answer_help") {
-          const assign = await env.DB.prepare(`SELECT * FROM assignments WHERE id = ? AND invite_token = ?`).bind(body.run_id, token).first();
+        const submitHandoffForAgent = async (runId, payload) => {
+          const assign = await env.DB.prepare(`SELECT * FROM assignments WHERE id = ? AND invite_token = ?`).bind(runId, token).first();
           if (!assign) return json({ error: "Assignment not found" }, 404);
-          const parsed = parseSubmission(body.handoff || body);
+          if (assign.status === "submitted" && assign.submitted_claim_id) {
+            const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+            return json({
+              claim_id: assign.submitted_claim_id,
+              status: "submitted",
+              idempotent_replay: true,
+              receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${assign.submitted_claim_id}`,
+            });
+          }
+          const parsed = parseSubmission(payload);
           if (!parsed.finding) return json({ error: "finding is required" }, 400);
+          const helpReq = assign.help_request_id
+            ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
+            : null;
           const claimId = uid("claim");
           await env.DB.prepare(
-            `INSERT INTO claims (id, mission_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
-            .bind(claimId, assign.mission_id, parsed.outcome, parsed.finding, parsed.how_to_check, parsed.assumptions, parsed.remaining_gap, parsed.references_text, assign.agent_session, assign.model_family)
+            .bind(
+              claimId,
+              assign.mission_id,
+              helpReq?.strategy_id || null,
+              helpReq?.target_claim_id || null,
+              parsed.outcome,
+              parsed.finding,
+              parsed.how_to_check,
+              parsed.assumptions,
+              parsed.remaining_gap,
+              parsed.references_text,
+              assign.agent_session,
+              assign.model_family
+            )
             .run();
           if (assign.help_request_id) {
             await env.DB.prepare(`UPDATE help_requests SET status = 'answered', answer_claim_id = ? WHERE id = ?`).bind(claimId, assign.help_request_id).run();
           }
           await env.DB.prepare(`UPDATE assignments SET status = 'submitted', submitted_claim_id = ? WHERE id = ?`).bind(claimId, assign.id).run();
-          return json({ claim_id: claimId, status: "submitted" });
+          await env.DB.prepare(`UPDATE invites SET quota_used = quota_used + 1 WHERE token = ?`).bind(assign.invite_token).run();
+
+          const followUp = String(payload?.follow_up_question || "").trim();
+          let follow_up_help_id = null;
+          if (followUp.length >= 3) {
+            follow_up_help_id = uid("help");
+            await env.DB.prepare(
+              `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
+               VALUES (?, ?, ?, ?, 'verify', ?, ?, 'Verify or refute the claim and close any remaining gap.', 1, ?, ?)`
+            )
+              .bind(follow_up_help_id, assign.mission_id, helpReq?.strategy_id || null, claimId, "Follow-up: " + followUp.slice(0, 70), followUp, assign.model_family, assign.agent_session)
+              .run();
+          }
+
+          const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+          return json({
+            claim_id: claimId,
+            status: "submitted",
+            follow_up_help_id,
+            receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`,
+          });
+        };
+
+        if (method === "GET" && path === "/api/agent/v1/missions") {
+          return json(await listMissionsForAgent());
+        }
+        if (method === "POST" && path === "/api/agent/v1/draw") {
+          const body = await request.json().catch(() => ({}));
+          return await drawForAgent(body);
+        }
+        const openMatch = path.match(/^\/api\/agent\/v1\/runs\/([^/]+)\/open$/);
+        if (method === "POST" && openMatch) {
+          return await openRunForAgent(decodeURIComponent(openMatch[1]));
+        }
+        const handoffMatch = path.match(/^\/api\/agent\/v1\/runs\/([^/]+)\/handoff$/);
+        if (method === "POST" && handoffMatch) {
+          const body = await request.json();
+          return await submitHandoffForAgent(decodeURIComponent(handoffMatch[1]), body.handoff || body);
         }
 
-        return json({ error: "Unsupported action" }, 400);
+        if (method === "POST" && path === "/v1/agent") {
+          const body = await request.json();
+          const action = body.action;
+
+          if (action === "list_missions") {
+            return json(await listMissionsForAgent());
+          }
+          if (action === "draw_task") {
+            return await drawForAgent(body);
+          }
+          if (action === "open_assignment") {
+            return await openRunForAgent(body.run_id);
+          }
+          if (action === "request_help") {
+            const id = uid("help");
+            await env.DB.prepare(
+              `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+            )
+              .bind(
+                id,
+                body.mission_id || invite.mission_id,
+                body.strategy_id || null,
+                body.target_claim_id || null,
+                body.kind || "verify",
+                String(body.title || "Cross-model help request").trim(),
+                String(body.question || "").trim(),
+                String(body.criterion || "Provide a clear check or counterexample.").trim(),
+                body.model_family || "Other",
+                body.agent_session || token
+              )
+              .run();
+            return json({ help_request_id: id }, 201);
+          }
+          if (action === "submit_handoff" || action === "answer_help") {
+            return await submitHandoffForAgent(body.run_id, body.handoff || body);
+          }
+
+          return json({ error: "Unsupported action" }, 400);
+        }
       }
 
       return json({ error: "Not found" }, 404);
