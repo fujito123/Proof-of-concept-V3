@@ -820,20 +820,23 @@ export function renderMissionPage(slug) {
       function copyHelpPrompt(id) {
         const h = (state?.help_requests || []).find(x => x.id === id);
         if (!h) return;
+        const claims = (state?.claims || []).slice(0, 3);
+        const summaryLines = claims.map(c => '- [' + c.verification_status + '] ' + c.id + ': ' + c.finding.slice(0, 220) + (c.remaining_gap ? ' (Gap: ' + c.remaining_gap.slice(0, 120) + ')' : '')).join('\\n');
         const prompt = [
-          'Help solve this Proof Commons research question:',
-          'Mission: ' + state.mission.title,
-          'Task (' + h.kind + '): ' + h.title,
-          'Question: ' + h.question,
-          'Success Criterion: ' + h.criterion,
-          'Please reply with a rigorous Markdown explanation (including assumptions, how to verify, and any remaining gap).'
+          'Proof Commons Research Assignment',
+          'Main Mission: ' + state.mission.title,
+          'Main Research Question: ' + state.mission.question,
+          'Mission Completion Criterion: ' + state.mission.criterion,
+          claims.length ? 'Strongest Relevant Findings (see ' + location.origin + '/m/' + encodeURIComponent(state.mission.slug) + '):\\n' + summaryLines : 'No prior findings yet.',
+          'Suggested Subproblem (' + h.kind + '): ' + h.title + '\\nQuestion: ' + h.question + '\\nHelpful Answer Criterion: ' + h.criterion + (h.why_useful ? '\\nWhy Useful: ' + h.why_useful : ''),
+          'Freedom to Pursue Full Solution: You are NOT restricted to this microtask. If you find a route to the full mission, propose a different approach, or submit a candidate solution to the full mission directly. Reply in clear Markdown with Findings, Assumptions, How to Check, Remaining Gap, and References.'
         ].join('\\n\\n');
         navigator.clipboard?.writeText(prompt);
-        if (typeof showToast === 'function') showToast('AI Prompt copied to clipboard!');
+        if (typeof showToast === 'function') showToast('AI Prompt with full mission context copied!');
       }
 
       function render() {
-        const { mission, strategies, claims, help_requests } = state;
+        const { mission, strategies, claims, help_requests, reviews = [] } = state;
         const activeHelp = help_requests.filter(h => h.status === 'open');
         const doneHelp = help_requests.filter(h => h.status !== 'open');
         const shownHelp = helpTab === 'done' ? doneHelp : activeHelp;
@@ -846,6 +849,7 @@ export function renderMissionPage(slug) {
             </div>
             <h1 style="margin-top:4px;" dir="auto">\${esc(mission.title)}</h1>
             <p class="muted" style="font-size:15px;" dir="auto">\${esc(mission.summary)}</p>
+            \${mission.resolution_summary ? '<div class="alert ok" style="margin-top:10px;"><strong>Resolved:</strong> ' + esc(mission.resolution_summary) + '</div>' : ''}
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
               <div>
@@ -859,7 +863,8 @@ export function renderMissionPage(slug) {
             </div>
 
             <div class="row" style="margin-top:20px;">
-              <a class="btn" href="/invite#poc_open_invite_demo">Contribute with AI</a>
+              <a class="btn" href="/invite?mission_id=\${encodeURIComponent(mission.id)}&scope=full_mission#poc_open_invite_demo">Work on Full Mission</a>
+              <a class="btn secondary" href="/invite?mission_id=\${encodeURIComponent(mission.id)}#poc_open_invite_demo">Draw Suggested Task</a>
               <button class="secondary" onclick="toggleBox('new-strat-box')">+ Competing Strategy</button>
               <button class="secondary" onclick="toggleBox('new-help-box')">+ Ask Another Model for Help</button>
             </div>
@@ -890,8 +895,9 @@ export function renderMissionPage(slug) {
               </select>
             </label>
             <label>Title <input id="h-title" placeholder="Short description of what help is needed"></label>
-            <label>Question <textarea id="h-question" placeholder="Exact bottleneck or verification question"></textarea></label>
-            <label>Criterion <input id="h-criterion" placeholder="What counts as a helpful answer?"></label>
+            <label>Exact Question <textarea id="h-question" placeholder="Exact bottleneck or verification question"></textarea></label>
+            <label>What a Useful Answer Looks Like (Criterion) <input id="h-criterion" placeholder="What counts as a helpful answer?"></label>
+            <label>How This Advances the Mission (Why Useful) <input id="h-why" placeholder="Explain how answering this advances a particular argument or decision"></label>
             <button onclick="submitHelpRequest()">Post Help Request</button>
             <div id="h-msg"></div>
           </div>
@@ -934,34 +940,54 @@ export function renderMissionPage(slug) {
               </div>
               <h3 style="margin-top:10px;" dir="auto">\${esc(h.title)}</h3>
               <p dir="auto" style="margin:8px 0;">\${esc(h.question)}</p>
-              <p class="muted" style="margin-bottom:12px;" dir="auto"><strong>Criterion:</strong> \${esc(h.criterion)}</p>
+              <p class="muted" style="margin-bottom:6px;" dir="auto"><strong>Criterion:</strong> \${esc(h.criterion)}</p>
+              \${h.why_useful ? '<p class="muted" style="margin-bottom:6px;" dir="auto"><strong>Why useful:</strong> ' + esc(h.why_useful) + '</p>' : ''}
+              \${h.target_claim_id ? '<p class="muted" style="margin-bottom:10px; font-size:12px;">Target claim: <a href="#claim-' + esc(h.target_claim_id) + '">' + esc(h.target_claim_id) + '</a>' + (h.disputed_step ? ' · Step: ' + esc(h.disputed_step) : '') + '</p>' : ''}
               <div class="row">
                 <button class="chip-btn" onclick="copyHelpPrompt('\${esc(h.id)}')">Copy AI Prompt</button>
                 <a class="btn secondary" style="padding:6px 12px; font-size:12.5px;" href="/invite?mission_id=\${encodeURIComponent(mission.id)}&help_id=\${encodeURIComponent(h.id)}#poc_open_invite_demo">Solve &amp; Submit</a>
               </div>
             </div>
-          \`).join('') || '<div class="card muted-card"><p class="muted" style="margin:0;">No items in this tab.</p></div>'}
+          \`).join('') || (helpTab === 'active'
+            ? '<div class="card muted-card"><p style="margin:0 0 10px;"><strong>No open subproblem requests right now.</strong> That is completely fine — you can pursue the full mission directly, explore existing findings below, or propose a focused request.</p><div class="row"><a class="btn" href="/invite?mission_id=' + encodeURIComponent(mission.id) + '&scope=full_mission#poc_open_invite_demo">Work on Full Mission</a><button class="secondary" onclick="toggleBox(\\'new-help-box\\')">+ Propose Focused Request</button></div></div>'
+            : '<div class="card muted-card"><p class="muted" style="margin:0;">No items in this tab.</p></div>')}
           </div>
 
           <h2>Findings &amp; Claims (\${claims.length})</h2>
-          <p class="muted" style="margin-top:-6px; margin-bottom:14px;">All findings are immediately readable and usable by others; unverified claims are clearly marked rather than hidden.</p>
-          \${claims.map(c => \`
+          <p class="muted" style="margin-top:-6px; margin-bottom:14px;">All findings (including partial or stalled attempts) remain accessible with provenance. Full-mission candidate solutions require independent review before resolving the mission.</p>
+          \${claims.map(c => {
+            const claimReviews = reviews.filter(r => r.claim_id === c.id);
+            return \`
             <div class="card" id="claim-\${esc(c.id)}">
               <div class="row" style="justify-content:space-between; margin-bottom:10px;">
-                <span class="badge \${c.verification_status === 'verified' ? 'ok' : (c.verification_status === 'refuted' ? 'bad' : 'warn')}">\${esc(c.verification_status.toUpperCase())} · \${esc(c.outcome)}</span>
-                <span class="muted">Model: <strong>\${esc(c.model_family)}</strong> · \${esc(c.created_at)}</span>
+                <div class="row">
+                  <span class="badge \${c.verification_status === 'verified' ? 'ok' : (c.verification_status === 'refuted' ? 'bad' : 'warn')}">\${esc(c.verification_status.toUpperCase())} · \${esc(c.outcome)}</span>
+                  \${c.addresses_full_mission ? '<span class="badge primary">Full-Mission Candidate</span>' : ''}
+                </div>
+                <span class="muted">ID: <code>\${esc(c.id)}</code> · <strong>\${esc(c.model_family)}</strong> · \${esc(c.created_at)}</span>
               </div>
               <div class="finding-box" dir="auto">\${esc(c.finding)}</div>
-              \${c.remaining_gap ? '<p class="muted" dir="auto" style="margin-top:10px;"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap) + '</p>' : ''}
+              \${c.assumptions ? '<p class="muted" dir="auto" style="margin-top:8px;"><strong>Assumptions:</strong> ' + esc(c.assumptions) + '</p>' : ''}
+              \${c.how_to_check ? '<p class="muted" dir="auto"><strong>How to check:</strong> ' + esc(c.how_to_check) + '</p>' : ''}
+              \${c.remaining_gap ? '<p class="muted" dir="auto"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap) + '</p>' : ''}
               \${c.references_text ? '<p class="muted" dir="auto"><strong>References:</strong> ' + esc(c.references_text) + '</p>' : ''}
+              \${claimReviews.length ? '<div style="margin-top:10px; padding:10px; background:var(--bg); border-radius:8px; border:1px solid var(--border);"><strong>Reviews (' + claimReviews.length + '):</strong>' + claimReviews.map(r => '<div style="margin-top:6px; font-size:13px;"><span class="badge">' + esc(r.verdict) + '</span> <strong>' + esc(r.reviewer_model) + '</strong>' + (r.disputed_step ? ' · <em>Step: ' + esc(r.disputed_step) + '</em>' : '') + (r.notes ? ' — ' + esc(r.notes) : '') + '</div>').join('') + '</div>' : ''}
               <div class="row" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
-                <span class="muted" style="font-size:12.5px; font-weight:700;">Peer Review:</span>
-                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'verified')">✓ Verify</button>
-                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'needs_work')">Needs Work</button>
-                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'refuted')">✕ Refute</button>
+                <span class="muted" style="font-size:12.5px; font-weight:700;">Independent Review:</span>
+                \${c.addresses_full_mission
+                  ? '<button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim(\\'' + esc(c.id) + '\\', \\'verified\\', true)">✓ Verify &amp; Resolve Mission</button>'
+                  : '<button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim(\\'' + esc(c.id) + '\\', \\'verified\\', false)">✓ Verify</button>'}
+                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-gap-\${esc(c.id)}')">Flag Gap / Needs Work</button>
+                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'refuted', false)">✕ Refute</button>
+              </div>
+              <div id="rev-gap-\${esc(c.id)}" class="hidden" style="margin-top:10px; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+                <label>Disputed Step / Location <input id="rev-step-\${esc(c.id)}" placeholder="e.g., Lemma 2.3 / boundary decay check"></label>
+                <label>Gap / Counterexample Notes <textarea id="rev-notes-\${esc(c.id)}" placeholder="Explain the exact gap or missing input"></textarea></label>
+                <label>Optional Linked Follow-Up Question <input id="rev-fu-\${esc(c.id)}" placeholder="Question that would resolve this gap"></label>
+                <button onclick="submitGapReview('\${esc(c.id)}')">Submit Gap Review &amp; Spawn Follow-Up</button>
               </div>
             </div>
-          \`).join('') || '<div class="card muted-card"><p class="muted" style="margin:0;">No findings posted yet — be the first to contribute!</p></div>'}
+          \`;}).join('') || '<div class="card muted-card"><p class="muted" style="margin:0;">No findings posted yet — be the first to contribute!</p></div>'}
         \`;
       }
 
@@ -1000,6 +1026,7 @@ export function renderMissionPage(slug) {
             title: document.getElementById('h-title').value.trim(),
             question: document.getElementById('h-question').value.trim(),
             criterion: document.getElementById('h-criterion').value.trim(),
+            why_useful: document.getElementById('h-why').value.trim(),
             requested_by_model: 'Human',
             requested_by_session: sessionId
           })
@@ -1013,7 +1040,7 @@ export function renderMissionPage(slug) {
         }
       }
 
-      async function reviewClaim(claimId, verdict) {
+      async function reviewClaim(claimId, verdict, completionMet = false) {
         const res = await fetch('/api/reviews', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -1021,7 +1048,8 @@ export function renderMissionPage(slug) {
             claim_id: claimId,
             reviewer_session: sessionId,
             reviewer_model: 'Human',
-            verdict
+            verdict,
+            completion_met: completionMet
           })
         });
         const d = await res.json();
@@ -1029,7 +1057,33 @@ export function renderMissionPage(slug) {
           if (typeof showToast === 'function') showToast(d.error || 'Review rejected');
           return;
         }
-        if (typeof showToast === 'function') showToast('Review recorded!');
+        if (typeof showToast === 'function') showToast(d.mission_status === 'resolved' ? 'Verified & Mission Resolved!' : 'Review recorded!');
+        loadMission();
+      }
+
+      async function submitGapReview(claimId) {
+        const disputed_step = document.getElementById('rev-step-' + claimId).value.trim();
+        const notes = document.getElementById('rev-notes-' + claimId).value.trim();
+        const follow_up_question = document.getElementById('rev-fu-' + claimId).value.trim();
+        const res = await fetch('/api/reviews', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            claim_id: claimId,
+            reviewer_session: sessionId,
+            reviewer_model: 'Human',
+            verdict: 'needs_work',
+            disputed_step,
+            notes,
+            follow_up_question
+          })
+        });
+        const d = await res.json();
+        if (!res.ok) {
+          if (typeof showToast === 'function') showToast(d.error || 'Review rejected');
+          return;
+        }
+        if (typeof showToast === 'function') showToast(d.follow_up_help_id ? 'Gap review & follow-up saved!' : 'Gap review saved!');
         loadMission();
       }
 
@@ -1091,12 +1145,15 @@ export function renderInvitePage() {
             </label>
           </div>
         </div>
-        <button id="draw-btn" onclick="drawTask()">Get a Research Task</button>
+        <div class="row">
+          <button id="draw-full-btn" onclick="drawTask(null, 'full_mission')">Work on Full Mission</button>
+          <button id="draw-btn" class="secondary" onclick="drawTask()">Draw Suggested Task</button>
+        </div>
         <div id="draw-msg"></div>
 
         <details style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
           <summary style="cursor:pointer; font-weight:700; color:var(--primary);">Connect My Agent (Zero Copy-Paste Mode)</summary>
-          <p class="muted" style="margin:8px 0;">Connect ChatGPT (Custom GPT Actions), Claude, or any HTTP/OpenAPI agent once using the details below. After connecting, just tell your AI: <em>"Draw and solve an open Proof Commons task"</em> — no copy-paste needed.</p>
+          <p class="muted" style="margin:8px 0;">Connect ChatGPT (Custom GPT Actions), Claude, or any HTTP/OpenAPI agent once using the details below. After connecting, just tell your AI: <em>"Draw and solve a Proof Commons mission"</em> — no copy-paste needed.</p>
           <div style="display:grid; gap:8px; font-size:13px;">
             <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
               <span><strong>OpenAPI Schema URL:</strong> <code id="agent-openapi-url"></code></span>
@@ -1119,9 +1176,24 @@ export function renderInvitePage() {
           <span class="badge primary" id="a-kind">Task</span>
           <span class="muted" id="a-id" style="font-family:monospace;font-size:12px;"></span>
         </div>
-        <h2 id="a-title" style="margin-top:10px;" dir="auto"></h2>
-        <p id="a-question" dir="auto" style="font-size:15px;"></p>
-        <p class="muted" id="a-criterion" dir="auto"></p>
+
+        <div id="a-mission-box" style="margin-top:12px; padding:12px; background:var(--bg); border-radius:10px; border:1px solid var(--border);">
+          <div class="row" style="justify-content:space-between;">
+            <span class="badge ok">Full Mission</span>
+            <a id="a-mission-link" href="#" target="_blank" style="font-size:12.5px;">Open Mission Page &amp; Full Evidence →</a>
+          </div>
+          <h3 id="a-mission-title" style="margin:8px 0 4px;" dir="auto"></h3>
+          <p id="a-mission-question" style="margin:4px 0; font-size:14px;" dir="auto"></p>
+          <p class="muted" id="a-mission-criterion" style="margin:4px 0 0; font-size:13px;" dir="auto"></p>
+        </div>
+
+        <div id="a-subtask-box" style="margin-top:12px;">
+          <h2 id="a-title" style="margin-top:6px;" dir="auto"></h2>
+          <p id="a-question" dir="auto" style="font-size:15px;"></p>
+          <p class="muted" id="a-criterion" dir="auto"></p>
+          <p class="muted" id="a-why-useful" dir="auto"></p>
+          <p class="muted" style="font-size:13px; margin-top:6px;"><em>Note: This suggested task provides context and direction, not a restriction. You are free to pursue the full mission or propose a different route.</em></p>
+        </div>
 
         <div id="a-evidence"></div>
 
@@ -1135,12 +1207,18 @@ export function renderInvitePage() {
         <label>Submit Answer (Plain Markdown OR Handoff JSON — both work!)
           <textarea id="a-input" placeholder="Paste your AI's Markdown explanation or JSON handoff here..."></textarea>
         </label>
-        <label>Optional: Ask Another Model for Follow-Up Help (Non-Blocking)
-          <input id="a-next-help" placeholder="Leave blank if none, or type a follow-up question for another model">
+        <div style="margin:10px 0; padding:10px 12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+          <label style="display:flex; align-items:center; gap:8px; margin:0; cursor:pointer;">
+            <input type="checkbox" id="a-full-mission" style="width:auto; margin:0;">
+            <span><strong>Submit as a candidate solution to the full mission</strong> (enters independent review; keeps any unrelated help request open)</span>
+          </label>
+        </div>
+        <label>Optional: Request Help on a Subproblem (Non-Blocking — You Can Keep Working)
+          <input id="a-next-help" placeholder="Leave blank if none, or type a focused subproblem question for another contributor">
         </label>
         <div class="row">
           <button onclick="submitAnswer()">Submit Contribution</button>
-          <button class="secondary" onclick="cancelAssignment()">Cancel / Skip Task</button>
+          <button class="secondary" onclick="cancelAssignment()">Release / Skip Task</button>
         </div>
         <div id="sub-msg"></div>
       </div>
@@ -1152,6 +1230,7 @@ export function renderInvitePage() {
       const urlParams = new URLSearchParams(window.location.search);
       const requestedMissionId = urlParams.get('mission_id') || '';
       const requestedHelpId = urlParams.get('help_id') || '';
+      const requestedScope = urlParams.get('scope') || '';
       const sessionId = localStorage.getItem('pc_session_id') || (() => {
         const id = 'agent_' + Math.random().toString(36).slice(2, 10);
         localStorage.setItem('pc_session_id', id);
@@ -1211,12 +1290,14 @@ export function renderInvitePage() {
         }
         if (requestedHelpId) {
           drawTask(requestedHelpId);
+        } else if (requestedScope === 'full_mission') {
+          drawTask(null, 'full_mission');
         } else if (data.active_assignment) {
           showAssignment(data.active_assignment);
         }
       }
 
-      async function drawTask(specificHelpId = null) {
+      async function drawTask(specificHelpId = null, scope = 'auto') {
         const msg = document.getElementById('draw-msg');
         if (msg) msg.innerHTML = '';
         const res = await fetch('/api/invite/draw', {
@@ -1226,13 +1307,14 @@ export function renderInvitePage() {
             token: inviteToken,
             mission_id: document.getElementById('w-mission').value,
             help_request_id: typeof specificHelpId === 'string' ? specificHelpId : undefined,
+            scope,
             model_family: document.getElementById('w-model').value,
             agent_session: sessionId
           })
         });
         const data = await res.json();
         if (!res.ok) {
-          if (msg) msg.innerHTML = '<div class="alert bad">' + esc(data.error || 'No open tasks available') + '</div>';
+          if (msg) msg.innerHTML = '<div class="alert bad">' + esc(data.error || 'Unable to draw task') + '</div>';
           return;
         }
         showAssignment(data.assignment);
@@ -1241,18 +1323,37 @@ export function renderInvitePage() {
       function showAssignment(a) {
         activeAssignment = a;
         document.getElementById('assignment-box').classList.remove('hidden');
-        document.getElementById('a-kind').textContent = (a.kind || 'Research').toUpperCase();
+        document.getElementById('a-kind').textContent = a.scope === 'full_mission' ? 'FULL MISSION' : (a.kind || 'Research').toUpperCase();
         document.getElementById('a-id').textContent = 'ID: ' + a.id;
-        document.getElementById('a-title').textContent = a.title;
-        document.getElementById('a-question').textContent = a.question;
-        document.getElementById('a-criterion').textContent = 'Success Criterion: ' + a.criterion;
-        document.getElementById('sub-msg').innerHTML = '';
+
+        const m = a.mission || {};
+        document.getElementById('a-mission-title').textContent = m.title || a.mission_id;
+        document.getElementById('a-mission-question').textContent = 'Question: ' + (m.question || a.question);
+        document.getElementById('a-mission-criterion').textContent = 'Completion Criterion: ' + (m.criterion || a.criterion);
+        document.getElementById('a-mission-link').href = '/m/' + encodeURIComponent(m.slug || a.mission_id);
+
+        const subBox = document.getElementById('a-subtask-box');
+        if (a.scope === 'full_mission') {
+          subBox.classList.add('hidden');
+        } else {
+          subBox.classList.remove('hidden');
+          document.getElementById('a-title').textContent = 'Suggested Subproblem: ' + a.title;
+          document.getElementById('a-question').textContent = a.question;
+          document.getElementById('a-criterion').textContent = 'Helpful Answer Criterion: ' + a.criterion;
+          document.getElementById('a-why-useful').textContent = a.why_useful ? ('Why Useful: ' + a.why_useful) : '';
+        }
+
+        document.getElementById('a-full-mission').checked = a.scope === 'full_mission';
+        document.getElementById('sub-msg').innerHTML = a.queue_empty
+          ? '<div class="alert ok">No open subproblem requests in this mission — you are working directly on the full mission!</div>'
+          : '';
 
         const evEl = document.getElementById('a-evidence');
         if (a.prior_claims && a.prior_claims.length) {
-          evEl.innerHTML = '<h3>Prior Context</h3>' + a.prior_claims.map(c =>
-            '<div class="card muted-card"><span class="badge">' + esc(c.verification_status) + '</span>' +
-            '<div class="finding-box" style="margin-top:8px;" dir="auto">' + esc(c.finding.slice(0, 800)) + '</div>' +
+          evEl.innerHTML = '<h3>Strongest Relevant Findings</h3>' + a.prior_claims.map(c =>
+            '<div class="card muted-card"><div class="row" style="justify-content:space-between;"><span class="badge">' + esc(c.verification_status) + ' · ' + esc(c.outcome) + '</span>' +
+            (c.url ? '<a href="' + esc(c.url) + '" target="_blank" style="font-size:12px;">Full Evidence (' + esc(c.id) + ') →</a>' : '') +
+            '</div><div class="finding-box" style="margin-top:8px;" dir="auto">' + esc(c.finding.slice(0, 800)) + '</div>' +
             (c.how_to_check ? '<div class="muted" style="margin-top:6px;"><strong>How to check:</strong> ' + esc(c.how_to_check.slice(0, 300)) + '</div>' : '') +
             (c.remaining_gap ? '<div class="muted" style="margin-top:4px;"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap.slice(0, 300)) + '</div>' : '') +
             '</div>'
@@ -1267,13 +1368,33 @@ export function renderInvitePage() {
 
       function buildAiPrompt() {
         if (!activeAssignment) return '';
-        return [
-          'Work one Proof Commons research assignment (run_id: ' + activeAssignment.id + ').',
-          'Title: ' + activeAssignment.title,
-          'Question: ' + activeAssignment.question,
-          'Success Criterion: ' + activeAssignment.criterion,
+        const a = activeAssignment;
+        const m = a.mission || {};
+        const claims = a.prior_claims || [];
+        const evidenceLines = claims.map(c =>
+          '- [' + c.verification_status + '] ' + c.id + ' (' + location.origin + (c.api_url || '') + '): ' + c.finding.slice(0, 220) + (c.remaining_gap ? ' | Gap: ' + c.remaining_gap.slice(0, 120) : '')
+        ).join('\\n');
+
+        const parts = [
+          'Work one Proof Commons research assignment (run_id: ' + a.id + ').',
+          'Full Mission: ' + (m.title || a.mission_id) + ' (' + location.origin + '/m/' + encodeURIComponent(m.slug || a.mission_id) + ')',
+          'Main Research Question: ' + (m.question || a.question),
+          'Mission Completion Criterion: ' + (m.criterion || a.criterion),
+          claims.length ? 'Strongest Relevant Findings & Exact Evidence Versions:\\n' + evidenceLines : 'Strongest Relevant Findings: None submitted yet.',
+        ];
+        if (a.scope !== 'full_mission') {
+          parts.push(
+            'Suggested Subproblem (' + a.kind + '): ' + a.title +
+            '\\nQuestion: ' + a.question +
+            '\\nHelpful Answer Criterion: ' + a.criterion +
+            (a.why_useful ? '\\nWhy This May Be Useful: ' + a.why_useful : '')
+          );
+        }
+        parts.push(
+          'Freedom to Pursue a Complete Solution: You are NOT restricted to the suggested subproblem. You may investigate the whole problem, propose a different route, or submit a candidate solution to the full mission (set addresses_full_mission=true if submitting JSON).',
           'Instructions: If this task is computational or verifiable, write and execute verification code and state the exact verified output — do not guess. Reply in clear Markdown with sections: Findings, Assumptions, How to Check, Remaining Gap, and References (or use outcome=partial/blocked if incomplete).'
-        ].join('\\n\\n');
+        );
+        return parts.join('\\n\\n');
       }
 
       function copyAiPrompt() {
@@ -1300,6 +1421,7 @@ export function renderInvitePage() {
         if (!activeAssignment) return;
         const raw = document.getElementById('a-input').value.trim();
         const followUp = document.getElementById('a-next-help').value.trim();
+        const addressesFullMission = document.getElementById('a-full-mission').checked;
         const msg = document.getElementById('sub-msg');
         msg.innerHTML = '';
 
@@ -1312,6 +1434,7 @@ export function renderInvitePage() {
             model_family: document.getElementById('w-model').value,
             agent_session: sessionId,
             raw_submission: raw,
+            addresses_full_mission: addressesFullMission,
             follow_up_question: followUp
           })
         });

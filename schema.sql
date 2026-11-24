@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS claims (
   references_text TEXT NOT NULL DEFAULT '',
   author_session TEXT NOT NULL,
   model_family TEXT NOT NULL DEFAULT 'Other',
+  addresses_full_mission INTEGER NOT NULL DEFAULT 0,
   verification_status TEXT NOT NULL DEFAULT 'unverified', -- 'unverified' | 'verified' | 'refuted'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -51,6 +52,8 @@ CREATE TABLE IF NOT EXISTS help_requests (
   title TEXT NOT NULL,
   question TEXT NOT NULL,
   criterion TEXT NOT NULL,
+  why_useful TEXT NOT NULL DEFAULT '',
+  disputed_step TEXT NOT NULL DEFAULT '',
   prefer_different_model INTEGER NOT NULL DEFAULT 1,
   requested_by_model TEXT NOT NULL DEFAULT 'Other',
   requested_by_session TEXT NOT NULL DEFAULT 'system',
@@ -65,6 +68,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   reviewer_session TEXT NOT NULL,
   reviewer_model TEXT NOT NULL DEFAULT 'Other',
   verdict TEXT NOT NULL, -- 'verified' | 'needs_work' | 'refuted'
+  completion_met INTEGER NOT NULL DEFAULT 0,
+  disputed_step TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

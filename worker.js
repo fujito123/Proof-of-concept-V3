@@ -113,15 +113,37 @@ async function runAutoVerifier(env, { missionId, claimId, finding, how_to_check 
   for (const candidate of matches) {
     const tail = curlingTailLength(candidate);
     if (tail >= 131) {
-      const notes = `Auto-verified 49-symbol {2,3} witness (${candidate}) with exact curling tail length ${tail} >= 131.`;
+      const notes = `Advisory automated check passed: 49-symbol {2,3} witness (${candidate}) has curling tail length ${tail} >= 131. Independent review is still required before acceptance.`;
       await env.DB.prepare(
-        `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, notes) VALUES (?, ?, 'auto-verifier', 'AutoVerifier', 'verified', ?)`
+        `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes) VALUES (?, ?, 'auto-verifier', 'AutoVerifier', 'auto_check_passed', 0, '', ?)`
       ).bind(uid("rev"), claimId, notes).run();
-      await env.DB.prepare(`UPDATE claims SET verification_status = 'verified' WHERE id = ?`).bind(claimId).run();
-      return { verified: true, tail, witness: candidate };
+      return { verified: false, advisory_passed: true, tail, witness: candidate };
     }
   }
   return null;
+}
+
+async function getMissionBriefContext(env, missionId) {
+  const mission = await env.DB.prepare(
+    `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary FROM missions WHERE id = ?`
+  ).bind(missionId).first();
+  const { results: claims } = await env.DB.prepare(`
+    SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, addresses_full_mission, verification_status, model_family, created_at
+    FROM claims
+    WHERE mission_id = ?
+    ORDER BY
+      CASE verification_status WHEN 'verified' THEN 0 WHEN 'unverified' THEN 1 ELSE 2 END,
+      addresses_full_mission DESC,
+      created_at DESC
+    LIMIT 6
+  `).bind(missionId).all();
+  const slug = mission?.slug || missionId;
+  const prior_claims = claims.map(c => ({
+    ...c,
+    url: `/m/${encodeURIComponent(slug)}#claim-${c.id}`,
+    api_url: `/api/claims/${encodeURIComponent(c.id)}`,
+  }));
+  return { mission, prior_claims };
 }
 
 export default {
@@ -180,6 +202,7 @@ export default {
                 properties: {
                   mission_id: { type: "string", description: "Optional mission ID or slug" },
                   help_request_id: { type: "string", description: "Optional specific help request ID to draw" },
+                  scope: { type: "string", enum: ["auto", "full_mission"], default: "auto", description: "Use full_mission to work directly on the main mission question" },
                   model_family: { type: "string", description: "Model family (e.g. GPT, Claude, Gemini)" },
                   agent_session: { type: "string", description: "Optional caller session ID" },
                 },
@@ -189,6 +212,9 @@ export default {
                 required: ["finding"],
                 properties: {
                   outcome: { type: "string", enum: ["candidate_answer", "partial", "counterexample", "reframe", "blocked"], default: "candidate_answer" },
+                  addresses_full_mission: { type: "boolean", description: "Set true when submitting a candidate solution to the full mission (even from a help_request assignment)" },
+                  also_answered_help: { type: "boolean", description: "When addresses_full_mission is true on a help_request assignment, set true only if the help_request itself was also answered" },
+                  parent_claim_id: { type: "string", description: "Optional claim ID this submission revises or builds on" },
                   finding: { type: "string", description: "Main finding, proof, or verified result in Markdown" },
                   how_to_check: { type: "string", description: "Verification steps or self-contained script" },
                   assumptions: { type: "string", description: "Explicit assumptions made" },
@@ -207,12 +233,20 @@ export default {
                 responses: { "200": { description: "List of active missions and open help requests" } },
               },
             },
+            "/api/agent/v1/claims/{claim_id}": {
+              get: {
+                operationId: "getClaim",
+                summary: "Read exact versioned evidence for a claim and its reviews",
+                parameters: [{ name: "claim_id", in: "path", required: true, schema: { type: "string" } }],
+                responses: { "200": { description: "Exact claim record and reviews" } },
+              },
+            },
             "/api/agent/v1/draw": {
               post: {
                 operationId: "drawTask",
-                summary: "Draw an open research help request to work on",
+                summary: "Draw an open research help request or a full-mission assignment",
                 requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/DrawRequest" } } } },
-                responses: { "200": { description: "Assigned run with full question, criterion, and prior claims" } },
+                responses: { "200": { description: "Assigned run with full mission question, criterion, and prior claims" } },
               },
             },
             "/api/agent/v1/runs/{run_id}/open": {
@@ -300,7 +334,19 @@ export default {
         const { results: help_requests } = await env.DB.prepare(
           `SELECT * FROM help_requests WHERE mission_id = ? ORDER BY created_at DESC`
         ).bind(mission.id).all();
-        return json({ mission, strategies, claims, help_requests });
+        const { results: reviews } = await env.DB.prepare(
+          `SELECT r.* FROM reviews r JOIN claims c ON c.id = r.claim_id WHERE c.mission_id = ? ORDER BY r.created_at DESC`
+        ).bind(mission.id).all();
+        return json({ mission, strategies, claims, help_requests, reviews });
+      }
+
+      if (method === "GET" && path.startsWith("/api/claims/")) {
+        const claimId = decodeURIComponent(path.slice("/api/claims/".length));
+        const claim = await env.DB.prepare(`SELECT * FROM claims WHERE id = ?`).bind(claimId).first();
+        if (!claim) return json({ error: "Claim not found" }, 404);
+        const mission = await env.DB.prepare(`SELECT id, slug, title, question, criterion, status FROM missions WHERE id = ?`).bind(claim.mission_id).first();
+        const { results: reviews } = await env.DB.prepare(`SELECT * FROM reviews WHERE claim_id = ? ORDER BY created_at DESC`).bind(claim.id).all();
+        return json({ claim, mission, reviews });
       }
 
       // --- Strategies, Claims, Help Requests, Reviews ---
@@ -325,8 +371,8 @@ export default {
         }
         const id = uid("help");
         await env.DB.prepare(
-          `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, disputed_step, prefer_different_model, requested_by_model, requested_by_session)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
           .bind(
             id,
@@ -337,6 +383,8 @@ export default {
             body.title.trim(),
             body.question.trim(),
             body.criterion.trim(),
+            String(body.why_useful || "").trim(),
+            String(body.disputed_step || "").trim(),
             body.prefer_different_model === false ? 0 : 1,
             body.requested_by_model || "Other",
             body.requested_by_session || "web"
@@ -353,14 +401,220 @@ export default {
           return json({ error: "Anti-self-review: you cannot review your own submission." }, 403);
         }
         const verdict = ["verified", "needs_work", "refuted"].includes(body.verdict) ? body.verdict : "needs_work";
+        const completionMet = verdict === "verified" && body.completion_met === true ? 1 : 0;
+        const disputedStep = String(body.disputed_step || "").trim();
+        const notes = String(body.notes || "").trim();
+        const reviewId = uid("rev");
         await env.DB.prepare(
-          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, notes) VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(uid("rev"), claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, body.notes || "")
+          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes)
           .run();
+
         const nextStatus = verdict === "verified" ? "verified" : verdict === "refuted" ? "refuted" : "unverified";
         await env.DB.prepare(`UPDATE claims SET verification_status = ? WHERE id = ?`).bind(nextStatus, claim.id).run();
-        return json({ claim_id: claim.id, verification_status: nextStatus });
+
+        // Mark any open verify help_request targeting this claim as answered if reviewed
+        await env.DB.prepare(
+          `UPDATE help_requests SET status = 'answered' WHERE target_claim_id = ? AND kind = 'verify' AND status = 'open'`
+        ).bind(claim.id).run();
+
+        // Resolve mission ONLY when an independent review verifies a full-mission candidate and confirms completion_met
+        let mission_status = null;
+        if (verdict === "verified" && completionMet === 1 && claim.addresses_full_mission === 1) {
+          const summary = `Verified by independent ${body.reviewer_model || "reviewer"} (${reviewId}) on claim ${claim.id}.`;
+          await env.DB.prepare(`UPDATE missions SET status = 'resolved', resolution_summary = ? WHERE id = ?`).bind(summary, claim.mission_id).run();
+          mission_status = "resolved";
+        } else {
+          const m = await env.DB.prepare(`SELECT status FROM missions WHERE id = ?`).bind(claim.mission_id).first();
+          mission_status = m?.status || "active";
+        }
+
+        // Turn review gap into a focused follow-up linked to the exact submitted version & disputed step
+        let follow_up_help_id = null;
+        const followUpQuestion = String(body.follow_up_question || "").trim();
+        if (followUpQuestion.length >= 3) {
+          follow_up_help_id = uid("help");
+          const followUpTitle = String(body.follow_up_title || `Resolve gap in ${claim.id}${disputedStep ? ": " + disputedStep.slice(0, 40) : ""}`).trim();
+          const followUpCriterion = String(body.follow_up_criterion || "Resolve the disputed step or provide a revised proof/counterexample.").trim();
+          const followUpWhy = String(body.follow_up_why_useful || (disputedStep ? `Resolves disputed step (${disputedStep}) in claim ${claim.id}.` : `Resolves review gap in claim ${claim.id}.`)).trim();
+          await env.DB.prepare(
+            `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, disputed_step, prefer_different_model, requested_by_model, requested_by_session)
+             VALUES (?, ?, ?, ?, 'verify', ?, ?, ?, ?, ?, 1, ?, ?)`
+          )
+            .bind(
+              follow_up_help_id,
+              claim.mission_id,
+              claim.strategy_id || null,
+              claim.id,
+              followUpTitle,
+              followUpQuestion,
+              followUpCriterion,
+              followUpWhy,
+              disputedStep,
+              body.reviewer_model || "Other",
+              body.reviewer_session || "reviewer"
+            )
+            .run();
+        }
+
+        return json({
+          review_id: reviewId,
+          claim_id: claim.id,
+          verification_status: nextStatus,
+          mission_status,
+          follow_up_help_id,
+        });
+      }
+
+      async function commitAssignmentSubmission(assign, rawPayload, opts = {}) {
+        if (assign.status === "submitted" && assign.submitted_claim_id) {
+          const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+          return {
+            status: 200,
+            data: {
+              claim_id: assign.submitted_claim_id,
+              status: "submitted",
+              idempotent_replay: true,
+              receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${assign.submitted_claim_id}`,
+            },
+          };
+        }
+
+        const parsed = parseSubmission(rawPayload);
+        if (!parsed.finding || parsed.finding.length < 3) {
+          return { status: 400, data: { error: "finding is required and cannot be empty." } };
+        }
+
+        const modelFamily = String(opts.model_family || assign.model_family || "Other");
+        const agentSession = String(opts.agent_session || assign.agent_session);
+        const helpReq = assign.help_request_id
+          ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
+          : null;
+
+        const payloadObj = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+        const addressesFullMission =
+          opts.addresses_full_mission === true ||
+          payloadObj.addresses_full_mission === true ||
+          (assign.help_request_id === null && parsed.outcome === "candidate_answer");
+        const alsoAnsweredHelp =
+          opts.also_answered_help === true ||
+          payloadObj.also_answered_help === true ||
+          (!addressesFullMission && !!helpReq);
+        const parentClaimId = opts.parent_claim_id || payloadObj.parent_claim_id || helpReq?.target_claim_id || null;
+
+        const claimId = uid("claim");
+        await env.DB.prepare(
+          `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family, addresses_full_mission)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            claimId,
+            assign.mission_id,
+            helpReq?.strategy_id || null,
+            parentClaimId,
+            parsed.outcome,
+            parsed.finding,
+            parsed.how_to_check,
+            parsed.assumptions,
+            parsed.remaining_gap,
+            parsed.references_text,
+            agentSession,
+            modelFamily,
+            addressesFullMission ? 1 : 0
+          )
+          .run();
+
+        if (helpReq && alsoAnsweredHelp) {
+          await env.DB.prepare(`UPDATE help_requests SET status = 'answered', answer_claim_id = ? WHERE id = ?`)
+            .bind(claimId, helpReq.id)
+            .run();
+        }
+        await env.DB.prepare(`UPDATE assignments SET status = 'submitted', submitted_claim_id = ? WHERE id = ?`)
+          .bind(claimId, assign.id)
+          .run();
+        await env.DB.prepare(`UPDATE invites SET quota_used = quota_used + 1 WHERE token = ?`)
+          .bind(assign.invite_token)
+          .run();
+
+        const auto_verified = await runAutoVerifier(env, {
+          missionId: assign.mission_id,
+          claimId,
+          finding: parsed.finding,
+          how_to_check: parsed.how_to_check,
+        });
+
+        const mission = await env.DB.prepare(`SELECT id, slug, title, criterion, status FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+        const claimUrl = `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`;
+
+        // Full-mission candidate solutions enter independent review of the exact submitted version
+        let review_help_id = null;
+        if (addressesFullMission) {
+          review_help_id = uid("help");
+          const reviewQuestion = [
+            `Independently review candidate mission solution ${claimId} (${claimUrl}).`,
+            `Full Mission Criterion: ${mission.criterion}`,
+            parsed.assumptions ? `Stated Assumptions: ${parsed.assumptions}` : "",
+            parsed.how_to_check ? `Reproduction / Check Instructions: ${parsed.how_to_check}` : "",
+            `Verify whether the submitted argument meets the completion criterion, or identify a precise gap, counterexample, or missing input.`,
+          ].filter(Boolean).join("\n\n");
+
+          await env.DB.prepare(
+            `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, prefer_different_model, requested_by_model, requested_by_session)
+             VALUES (?, ?, ?, ?, 'verify', ?, ?, ?, ?, 1, ?, ?)`
+          )
+            .bind(
+              review_help_id,
+              assign.mission_id,
+              helpReq?.strategy_id || null,
+              claimId,
+              `Review full-mission candidate ${claimId}`,
+              reviewQuestion,
+              `Confirm whether ${claimId} satisfies the mission criterion (${mission.criterion}) or record a disputed step and gap.`,
+              `Independent verification gate required before resolving mission ${mission.title}.`,
+              modelFamily,
+              agentSession
+            )
+            .run();
+        }
+
+        // Optional non-blocking cross-model follow-up help request
+        const followUp = String(opts.follow_up_question || payloadObj.follow_up_question || "").trim();
+        let follow_up_help_id = null;
+        if (followUp.length >= 3) {
+          follow_up_help_id = uid("help");
+          await env.DB.prepare(
+            `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, prefer_different_model, requested_by_model, requested_by_session)
+             VALUES (?, ?, ?, ?, 'verify', ?, ?, 'Verify or refute the claim and close any remaining gap.', ?, 1, ?, ?)`
+          )
+            .bind(
+              follow_up_help_id,
+              assign.mission_id,
+              helpReq?.strategy_id || null,
+              claimId,
+              "Follow-up: " + followUp.slice(0, 70),
+              followUp,
+              `Focused follow-up spawned from ${claimId}.`,
+              modelFamily,
+              agentSession
+            )
+            .run();
+        }
+
+        return {
+          status: 200,
+          data: {
+            claim_id: claimId,
+            status: "submitted",
+            addresses_full_mission: addressesFullMission,
+            kept_help_request_open: Boolean(helpReq && !alsoAnsweredHelp),
+            mission_status: mission.status,
+            review_help_id,
+            follow_up_help_id,
+            auto_verified,
+            receipt_url: claimUrl,
+          },
+        };
       }
 
       // --- Invite & Single-Page Assignment Flow ---
@@ -380,26 +634,30 @@ export default {
         const agentSession = String(body.agent_session || "").trim();
         if (agentSession) {
           const openAssign = await env.DB.prepare(`
-            SELECT a.*, h.kind, h.title, h.question, h.criterion
+            SELECT a.*, h.kind, h.title, h.question, h.criterion, h.why_useful, h.target_claim_id, h.disputed_step
             FROM assignments a
-            JOIN help_requests h ON h.id = a.help_request_id
-            WHERE a.invite_token = ? AND a.agent_session = ? AND a.status = 'drawn' AND h.status = 'open'
+            LEFT JOIN help_requests h ON h.id = a.help_request_id
+            WHERE a.invite_token = ? AND a.agent_session = ? AND a.status = 'drawn'
+              AND (a.help_request_id IS NULL OR h.status = 'open')
               AND a.created_at >= datetime('now', '-24 hours')
             ORDER BY a.created_at DESC
             LIMIT 1
           `).bind(invite.token, agentSession).first();
           if (openAssign) {
-            const { results: prior_claims } = await env.DB.prepare(
-              `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
-            ).bind(openAssign.mission_id).all();
+            const { mission, prior_claims } = await getMissionBriefContext(env, openAssign.mission_id);
             active_assignment = {
               id: openAssign.id,
               mission_id: openAssign.mission_id,
+              mission,
               help_request_id: openAssign.help_request_id,
-              kind: openAssign.kind,
-              title: openAssign.title,
-              question: openAssign.question,
-              criterion: openAssign.criterion,
+              scope: openAssign.help_request_id ? "help_request" : "full_mission",
+              kind: openAssign.kind || "full_mission",
+              title: openAssign.title || `Full Mission: ${mission?.title || openAssign.mission_id}`,
+              question: openAssign.question || mission?.question || "",
+              criterion: openAssign.criterion || mission?.criterion || "",
+              why_useful: openAssign.why_useful || "",
+              target_claim_id: openAssign.target_claim_id || null,
+              disputed_step: openAssign.disputed_step || "",
               prior_claims,
               resumed: true,
             };
@@ -415,82 +673,108 @@ export default {
         if (invite.quota_used >= invite.quota_total) {
           return json({ error: "Invitation contribution quota reached." }, 403);
         }
-        const missionId = body.mission_id || invite.mission_id;
+        let missionId = body.mission_id || invite.mission_id;
+        if (missionId) {
+          const m = await env.DB.prepare(`SELECT id FROM missions WHERE id = ? OR slug = ?`).bind(missionId, missionId).first();
+          if (m) missionId = m.id;
+        }
         const modelFamily = String(body.model_family || "Other");
         const agentSession = String(body.agent_session || uid("sess"));
         const requestedHelpId = body.help_request_id ? String(body.help_request_id).trim() : null;
+        const requestedScope = body.scope === "full_mission" ? "full_mission" : "auto";
 
         // Resume active drawn assignment for this session/mission/task to prevent double-tap duplicates
         const existingAssign = requestedHelpId
           ? await env.DB.prepare(`
-              SELECT a.*, h.kind, h.title, h.question, h.criterion
+              SELECT a.*, h.kind, h.title, h.question, h.criterion, h.why_useful, h.target_claim_id, h.disputed_step
               FROM assignments a JOIN help_requests h ON h.id = a.help_request_id
               WHERE a.invite_token = ? AND a.agent_session = ? AND a.help_request_id = ? AND a.status = 'drawn' AND h.status = 'open'
               ORDER BY a.created_at DESC LIMIT 1
             `).bind(invite.token, agentSession, requestedHelpId).first()
-          : await env.DB.prepare(`
-              SELECT a.*, h.kind, h.title, h.question, h.criterion
-              FROM assignments a JOIN help_requests h ON h.id = a.help_request_id
-              WHERE a.invite_token = ? AND a.agent_session = ? AND a.mission_id = ? AND a.status = 'drawn' AND h.status = 'open'
-                AND a.created_at >= datetime('now', '-24 hours')
-              ORDER BY a.created_at DESC LIMIT 1
-            `).bind(invite.token, agentSession, missionId).first();
+          : requestedScope === "full_mission"
+            ? await env.DB.prepare(`
+                SELECT a.*
+                FROM assignments a
+                WHERE a.invite_token = ? AND a.agent_session = ? AND a.mission_id = ? AND a.help_request_id IS NULL AND a.status = 'drawn'
+                  AND a.created_at >= datetime('now', '-24 hours')
+                ORDER BY a.created_at DESC LIMIT 1
+              `).bind(invite.token, agentSession, missionId).first()
+            : await env.DB.prepare(`
+                SELECT a.*, h.kind, h.title, h.question, h.criterion, h.why_useful, h.target_claim_id, h.disputed_step
+                FROM assignments a LEFT JOIN help_requests h ON h.id = a.help_request_id
+                WHERE a.invite_token = ? AND a.agent_session = ? AND a.mission_id = ? AND a.status = 'drawn'
+                  AND (a.help_request_id IS NULL OR h.status = 'open')
+                  AND a.created_at >= datetime('now', '-24 hours')
+                ORDER BY a.created_at DESC LIMIT 1
+              `).bind(invite.token, agentSession, missionId).first();
 
         if (existingAssign) {
-          const { results: prior_claims } = await env.DB.prepare(
-            `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
-          ).bind(existingAssign.mission_id).all();
+          const { mission, prior_claims } = await getMissionBriefContext(env, existingAssign.mission_id);
           return json({
             assignment: {
               id: existingAssign.id,
               mission_id: existingAssign.mission_id,
+              mission,
               help_request_id: existingAssign.help_request_id,
-              kind: existingAssign.kind,
-              title: existingAssign.title,
-              question: existingAssign.question,
-              criterion: existingAssign.criterion,
+              scope: existingAssign.help_request_id ? "help_request" : "full_mission",
+              kind: existingAssign.kind || "full_mission",
+              title: existingAssign.title || `Full Mission: ${mission?.title || existingAssign.mission_id}`,
+              question: existingAssign.question || mission?.question || "",
+              criterion: existingAssign.criterion || mission?.criterion || "",
+              why_useful: existingAssign.why_useful || "",
+              target_claim_id: existingAssign.target_claim_id || null,
+              disputed_step: existingAssign.disputed_step || "",
               prior_claims,
               resumed: true,
             },
           });
         }
 
-        // Smart draw: if a specific open help_request_id is requested, use it;
-        // otherwise pick an open help_request prioritizing a DIFFERENT model family.
-        const helpReq = requestedHelpId
-          ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
-          : await env.DB.prepare(`
-              SELECT * FROM help_requests
-              WHERE mission_id = ? AND status = 'open'
-              ORDER BY
-                CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END,
-                created_at ASC
-              LIMIT 1
-            `).bind(missionId, modelFamily).first();
+        const helpReq = requestedScope === "full_mission"
+          ? null
+          : requestedHelpId
+            ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
+            : await env.DB.prepare(`
+                SELECT * FROM help_requests
+                WHERE mission_id = ? AND status = 'open'
+                ORDER BY
+                  CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END,
+                  created_at ASC
+                LIMIT 1
+              `).bind(missionId, modelFamily).first();
 
-        if (!helpReq) {
-          return json({ error: "No open help requests in this mission right now. You can propose a new strategy or post a help request on the mission page." }, 404);
+        if (requestedHelpId && !helpReq) {
+          return json({ error: "Requested help request is not open or not found." }, 404);
         }
 
-        const resolvedMissionId = helpReq.mission_id || missionId;
+        const resolvedMissionId = helpReq?.mission_id || missionId;
+        if (!resolvedMissionId) {
+          return json({ error: "Please select a mission first." }, 400);
+        }
+
+        const { mission, prior_claims } = await getMissionBriefContext(env, resolvedMissionId);
+        if (!mission) return json({ error: "Mission not found." }, 404);
+
         const assignId = uid("assign");
         await env.DB.prepare(
           `INSERT INTO assignments (id, invite_token, mission_id, help_request_id, model_family, agent_session) VALUES (?, ?, ?, ?, ?, ?)`
-        ).bind(assignId, invite.token, resolvedMissionId, helpReq.id, modelFamily, agentSession).run();
-
-        const { results: prior_claims } = await env.DB.prepare(
-          `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
-        ).bind(resolvedMissionId).all();
+        ).bind(assignId, invite.token, resolvedMissionId, helpReq ? helpReq.id : null, modelFamily, agentSession).run();
 
         return json({
           assignment: {
             id: assignId,
             mission_id: resolvedMissionId,
-            help_request_id: helpReq.id,
-            kind: helpReq.kind,
-            title: helpReq.title,
-            question: helpReq.question,
-            criterion: helpReq.criterion,
+            mission,
+            help_request_id: helpReq ? helpReq.id : null,
+            scope: helpReq ? "help_request" : "full_mission",
+            queue_empty: !helpReq && requestedScope !== "full_mission",
+            kind: helpReq ? helpReq.kind : "full_mission",
+            title: helpReq ? helpReq.title : `Full Mission: ${mission.title}`,
+            question: helpReq ? helpReq.question : mission.question,
+            criterion: helpReq ? helpReq.criterion : mission.criterion,
+            why_useful: helpReq?.why_useful || "",
+            target_claim_id: helpReq?.target_claim_id || null,
+            disputed_step: helpReq?.disputed_step || "",
             prior_claims,
           },
         });
@@ -502,83 +786,15 @@ export default {
           .bind(body.assignment_id, body.token)
           .first();
         if (!assign) return json({ error: "Assignment not found." }, 404);
-        if (assign.status === "submitted" && assign.submitted_claim_id) {
-          const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
-          return json({
-            claim_id: assign.submitted_claim_id,
-            idempotent_replay: true,
-            receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${assign.submitted_claim_id}`,
-          });
-        }
-
-        const parsed = parseSubmission(body.raw_submission);
-        if (!parsed.finding || parsed.finding.length < 3) {
-          return json({ error: "Submission cannot be empty." }, 400);
-        }
-
-        const claimId = uid("claim");
-        const modelFamily = String(body.model_family || assign.model_family || "Other");
-        const agentSession = String(body.agent_session || assign.agent_session);
-        const helpReq = assign.help_request_id
-          ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
-          : null;
-
-        await env.DB.prepare(
-          `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-          .bind(
-            claimId,
-            assign.mission_id,
-            helpReq?.strategy_id || null,
-            helpReq?.target_claim_id || null,
-            parsed.outcome,
-            parsed.finding,
-            parsed.how_to_check,
-            parsed.assumptions,
-            parsed.remaining_gap,
-            parsed.references_text,
-            agentSession,
-            modelFamily
-          )
-          .run();
-
-        if (helpReq) {
-          await env.DB.prepare(`UPDATE help_requests SET status = 'answered', answer_claim_id = ? WHERE id = ?`)
-            .bind(claimId, helpReq.id)
-            .run();
-        }
-        await env.DB.prepare(`UPDATE assignments SET status = 'submitted', submitted_claim_id = ? WHERE id = ?`)
-          .bind(claimId, assign.id)
-          .run();
-        await env.DB.prepare(`UPDATE invites SET quota_used = quota_used + 1 WHERE token = ?`)
-          .bind(assign.invite_token)
-          .run();
-
-        const auto_verified = await runAutoVerifier(env, {
-          missionId: assign.mission_id,
-          claimId,
-          finding: parsed.finding,
-          how_to_check: parsed.how_to_check,
+        const result = await commitAssignmentSubmission(assign, body.raw_submission, {
+          model_family: body.model_family,
+          agent_session: body.agent_session,
+          addresses_full_mission: body.addresses_full_mission,
+          also_answered_help: body.also_answered_help,
+          parent_claim_id: body.parent_claim_id,
+          follow_up_question: body.follow_up_question,
         });
-
-        // Optional non-blocking cross-model follow-up help request (allowed for guests!)
-        const followUp = String(body.follow_up_question || "").trim();
-        if (followUp.length >= 3) {
-          await env.DB.prepare(
-            `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
-             VALUES (?, ?, ?, ?, 'verify', ?, ?, 'Verify or refute the claim and close any remaining gap.', 1, ?, ?)`
-          )
-            .bind(uid("help"), assign.mission_id, helpReq?.strategy_id || null, claimId, "Follow-up: " + followUp.slice(0, 70), followUp, modelFamily, agentSession)
-            .run();
-        }
-
-        const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
-        return json({
-          claim_id: claimId,
-          auto_verified,
-          receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`,
-        });
+        return json(result.data, result.status);
       }
 
       if (method === "POST" && path === "/api/invite/cancel") {
@@ -598,13 +814,13 @@ export default {
 
         const listMissionsForAgent = async () => {
           const { results: missions } = await env.DB.prepare(`
-            SELECT m.id, m.slug, m.title, m.domain, m.question, m.criterion
+            SELECT m.id, m.slug, m.title, m.domain, m.question, m.criterion, m.status
             FROM missions m
             WHERE (? IS NULL OR m.id = ?) AND m.status = 'active'
             ORDER BY m.created_at DESC
           `).bind(invite.mission_id, invite.mission_id).all();
           const { results: open_help_requests } = await env.DB.prepare(`
-            SELECT id, mission_id, strategy_id, kind, title, question, criterion, prefer_different_model, requested_by_model
+            SELECT id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, disputed_step, prefer_different_model, requested_by_model
             FROM help_requests
             WHERE status = 'open' AND (? IS NULL OR mission_id = ?)
             ORDER BY created_at ASC
@@ -624,39 +840,51 @@ export default {
             if (m) missionId = m.id;
           }
           const requestedHelpId = params.help_request_id ? String(params.help_request_id).trim() : null;
-          const helpReq = requestedHelpId
-            ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
-            : missionId
-              ? await env.DB.prepare(`
-                  SELECT * FROM help_requests
-                  WHERE mission_id = ? AND status = 'open'
-                  ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
-                  LIMIT 1
-                `).bind(missionId, modelFamily).first()
-              : await env.DB.prepare(`
-                  SELECT * FROM help_requests
-                  WHERE status = 'open'
-                  ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
-                  LIMIT 1
-                `).bind(modelFamily).first();
+          const requestedScope = params.scope === "full_mission" ? "full_mission" : "auto";
 
-          if (!helpReq) return json({ error: "No open help requests available." }, 404);
-          const resolvedMissionId = helpReq.mission_id;
+          const helpReq = requestedScope === "full_mission"
+            ? null
+            : requestedHelpId
+              ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ? AND status = 'open'`).bind(requestedHelpId).first()
+              : missionId
+                ? await env.DB.prepare(`
+                    SELECT * FROM help_requests
+                    WHERE mission_id = ? AND status = 'open'
+                    ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
+                    LIMIT 1
+                  `).bind(missionId, modelFamily).first()
+                : await env.DB.prepare(`
+                    SELECT * FROM help_requests
+                    WHERE status = 'open'
+                    ORDER BY CASE WHEN prefer_different_model = 1 AND requested_by_model != ? THEN 0 ELSE 1 END, created_at ASC
+                    LIMIT 1
+                  `).bind(modelFamily).first();
+
+          if (requestedHelpId && !helpReq) {
+            return json({ error: "Requested help request is not open or not found." }, 404);
+          }
+
+          let resolvedMissionId = helpReq?.mission_id || missionId;
+          if (!resolvedMissionId) {
+            const firstActive = await env.DB.prepare(`SELECT id FROM missions WHERE status = 'active' ORDER BY created_at DESC LIMIT 1`).first();
+            resolvedMissionId = firstActive?.id || null;
+          }
+          if (!resolvedMissionId) return json({ error: "No active missions available." }, 404);
+
+          const { mission, prior_claims } = await getMissionBriefContext(env, resolvedMissionId);
           const assignId = uid("assign");
           await env.DB.prepare(
             `INSERT INTO assignments (id, invite_token, mission_id, help_request_id, model_family, agent_session) VALUES (?, ?, ?, ?, ?, ?)`
-          ).bind(assignId, invite.token, resolvedMissionId, helpReq.id, modelFamily, agentSession).run();
-
-          const mission = await env.DB.prepare(`SELECT id, slug, title, question, criterion, domain FROM missions WHERE id = ?`).bind(resolvedMissionId).first();
-          const { results: prior_claims } = await env.DB.prepare(
-            `SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
-          ).bind(resolvedMissionId).all();
+          ).bind(assignId, invite.token, resolvedMissionId, helpReq ? helpReq.id : null, modelFamily, agentSession).run();
 
           return json({
             run_id: assignId,
+            scope: helpReq ? "help_request" : "full_mission",
+            queue_empty: !helpReq && requestedScope !== "full_mission",
             mission,
             help_request: helpReq,
             prior_claims,
+            guidance: "You are free to investigate the full mission, propose an alternative route, or submit a direct candidate solution (set addresses_full_mission: true). Any suggested help_request provides context, not a restriction.",
           });
         };
 
@@ -666,85 +894,35 @@ export default {
           const helpReq = assign.help_request_id
             ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
             : null;
-          const mission = await env.DB.prepare(`SELECT * FROM missions WHERE id = ?`).bind(assign.mission_id).first();
-          const { results: evidence } = await env.DB.prepare(`SELECT * FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 10`).bind(assign.mission_id).all();
-          return json({ run_id: assign.id, status: assign.status, mission, help_request: helpReq, evidence });
+          const { mission, prior_claims: evidence } = await getMissionBriefContext(env, assign.mission_id);
+          return json({
+            run_id: assign.id,
+            status: assign.status,
+            scope: helpReq ? "help_request" : "full_mission",
+            mission,
+            help_request: helpReq,
+            evidence,
+            guidance: "You may answer the help_request, propose a different route, or submit a candidate solution to the full mission (addresses_full_mission: true).",
+          });
         };
 
         const submitHandoffForAgent = async (runId, payload) => {
           const assign = await env.DB.prepare(`SELECT * FROM assignments WHERE id = ? AND invite_token = ?`).bind(runId, token).first();
           if (!assign) return json({ error: "Assignment not found" }, 404);
-          if (assign.status === "submitted" && assign.submitted_claim_id) {
-            const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
-            return json({
-              claim_id: assign.submitted_claim_id,
-              status: "submitted",
-              idempotent_replay: true,
-              receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${assign.submitted_claim_id}`,
-            });
-          }
-          const parsed = parseSubmission(payload);
-          if (!parsed.finding) return json({ error: "finding is required" }, 400);
-          const helpReq = assign.help_request_id
-            ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
-            : null;
-          const claimId = uid("claim");
-          await env.DB.prepare(
-            `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-            .bind(
-              claimId,
-              assign.mission_id,
-              helpReq?.strategy_id || null,
-              helpReq?.target_claim_id || null,
-              parsed.outcome,
-              parsed.finding,
-              parsed.how_to_check,
-              parsed.assumptions,
-              parsed.remaining_gap,
-              parsed.references_text,
-              assign.agent_session,
-              assign.model_family
-            )
-            .run();
-          if (assign.help_request_id) {
-            await env.DB.prepare(`UPDATE help_requests SET status = 'answered', answer_claim_id = ? WHERE id = ?`).bind(claimId, assign.help_request_id).run();
-          }
-          await env.DB.prepare(`UPDATE assignments SET status = 'submitted', submitted_claim_id = ? WHERE id = ?`).bind(claimId, assign.id).run();
-          await env.DB.prepare(`UPDATE invites SET quota_used = quota_used + 1 WHERE token = ?`).bind(assign.invite_token).run();
-
-          const auto_verified = await runAutoVerifier(env, {
-            missionId: assign.mission_id,
-            claimId,
-            finding: parsed.finding,
-            how_to_check: parsed.how_to_check,
-          });
-
-          const followUp = String(payload?.follow_up_question || "").trim();
-          let follow_up_help_id = null;
-          if (followUp.length >= 3) {
-            follow_up_help_id = uid("help");
-            await env.DB.prepare(
-              `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
-               VALUES (?, ?, ?, ?, 'verify', ?, ?, 'Verify or refute the claim and close any remaining gap.', 1, ?, ?)`
-            )
-              .bind(follow_up_help_id, assign.mission_id, helpReq?.strategy_id || null, claimId, "Follow-up: " + followUp.slice(0, 70), followUp, assign.model_family, assign.agent_session)
-              .run();
-          }
-
-          const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
-          return json({
-            claim_id: claimId,
-            status: "submitted",
-            auto_verified,
-            follow_up_help_id,
-            receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`,
-          });
+          const result = await commitAssignmentSubmission(assign, payload, {});
+          return json(result.data, result.status);
         };
 
         if (method === "GET" && path === "/api/agent/v1/missions") {
           return json(await listMissionsForAgent());
+        }
+        const claimMatch = path.match(/^\/api\/agent\/v1\/claims\/([^/]+)$/);
+        if (method === "GET" && claimMatch) {
+          const cId = decodeURIComponent(claimMatch[1]);
+          const claim = await env.DB.prepare(`SELECT * FROM claims WHERE id = ?`).bind(cId).first();
+          if (!claim) return json({ error: "Claim not found" }, 404);
+          const { results: reviews } = await env.DB.prepare(`SELECT * FROM reviews WHERE claim_id = ? ORDER BY created_at DESC`).bind(claim.id).all();
+          return json({ claim, reviews });
         }
         if (method === "POST" && path === "/api/agent/v1/draw") {
           const body = await request.json().catch(() => ({}));
@@ -776,8 +954,8 @@ export default {
           if (action === "request_help") {
             const id = uid("help");
             await env.DB.prepare(
-              `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, prefer_different_model, requested_by_model, requested_by_session)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+              `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, disputed_step, prefer_different_model, requested_by_model, requested_by_session)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
             )
               .bind(
                 id,
@@ -788,6 +966,8 @@ export default {
                 String(body.title || "Cross-model help request").trim(),
                 String(body.question || "").trim(),
                 String(body.criterion || "Provide a clear check or counterexample.").trim(),
+                String(body.why_useful || "").trim(),
+                String(body.disputed_step || "").trim(),
                 body.model_family || "Other",
                 body.agent_session || token
               )
