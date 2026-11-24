@@ -1,4 +1,3 @@
-```javascript
 // Modern, warm, mobile-first scientific UI for Proof Commons (Cloudflare Workers + D1)
 // Features: editorial hero, domain & model chips, visual viability gauges, EN/HE language toggle,
 // toast notifications, quick-invite chips, and zero-friction AI prompt builder.
@@ -1287,4 +1286,3 @@ export function renderInvitePage() {
   `;
   return layout("Contributor Workspace", body);
 }
-```
