@@ -179,12 +179,15 @@ export default {
 
       // --- OpenAPI 3.1 Spec for tool-connected agents (ChatGPT Actions, MCP, HTTP tools) ---
       if (method === "GET" && path === "/openapi.json") {
+        const scopedMission = String(url.searchParams.get("mission_id") || "").trim();
         return json({
           openapi: "3.1.0",
           info: {
-            title: "Proof Commons Agent API",
+            title: scopedMission ? `Proof Commons Agent API (${scopedMission})` : "Proof Commons Agent API",
             version: "2.2.0",
-            description: "Connect an AI agent directly to Proof Commons to browse missions, draw open research tasks, and submit verified findings without copy-paste.",
+            description: scopedMission
+              ? `Connected to Proof Commons mission "${scopedMission}". Always draw and work on mission_id="${scopedMission}" unless the user explicitly asks for another mission.`
+              : "Connect an AI agent directly to Proof Commons to browse missions, draw open research tasks, and submit verified findings without copy-paste.",
           },
           servers: [{ url: url.origin }],
           security: [{ bearerAuth: [] }],
@@ -200,7 +203,13 @@ export default {
               DrawRequest: {
                 type: "object",
                 properties: {
-                  mission_id: { type: "string", description: "Optional mission ID or slug" },
+                  mission_id: {
+                    type: "string",
+                    ...(scopedMission ? { default: scopedMission } : {}),
+                    description: scopedMission
+                      ? `Target mission ID (default: ${scopedMission})`
+                      : "Target mission ID or slug (specify the mission the user chose)",
+                  },
                   help_request_id: { type: "string", description: "Optional specific help request ID to draw" },
                   scope: { type: "string", enum: ["auto", "full_mission"], default: "auto", description: "Use full_mission to work directly on the main mission question" },
                   model_family: { type: "string", description: "Model family (e.g. GPT, Claude, Gemini)" },
@@ -241,10 +250,22 @@ export default {
                 responses: { "200": { description: "Exact claim record and reviews" } },
               },
             },
+            ...(scopedMission
+              ? {
+                  [`/api/agent/v1/missions/${encodeURIComponent(scopedMission)}/draw`]: {
+                    post: {
+                      operationId: "drawChosenMission",
+                      summary: `Draw an assignment specifically for mission ${scopedMission}`,
+                      requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/DrawRequest" } } } },
+                      responses: { "200": { description: "Assigned run for the chosen mission" } },
+                    },
+                  },
+                }
+              : {}),
             "/api/agent/v1/draw": {
               post: {
                 operationId: "drawTask",
-                summary: "Draw an open research help request or a full-mission assignment",
+                summary: "Draw an open research help request or a full-mission assignment for a chosen mission",
                 requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/DrawRequest" } } } },
                 responses: { "200": { description: "Assigned run with full mission question, criterion, and prior claims" } },
               },
@@ -923,6 +944,11 @@ export default {
           if (!claim) return json({ error: "Claim not found" }, 404);
           const { results: reviews } = await env.DB.prepare(`SELECT * FROM reviews WHERE claim_id = ? ORDER BY created_at DESC`).bind(claim.id).all();
           return json({ claim, reviews });
+        }
+        const missionDrawMatch = path.match(/^\/api\/agent\/v1\/missions\/([^/]+)\/draw$/);
+        if (method === "POST" && missionDrawMatch) {
+          const body = await request.json().catch(() => ({}));
+          return await drawForAgent({ ...body, mission_id: decodeURIComponent(missionDrawMatch[1]) });
         }
         if (method === "POST" && path === "/api/agent/v1/draw") {
           const body = await request.json().catch(() => ({}));

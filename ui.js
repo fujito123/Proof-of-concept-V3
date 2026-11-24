@@ -1131,7 +1131,7 @@ export function renderInvitePage() {
         <div class="row" style="margin-top:14px;">
           <div style="flex:2; min-width:220px;">
             <label>Mission
-              <select id="w-mission"></select>
+              <select id="w-mission" onchange="updateAgentConfig()"></select>
             </label>
           </div>
           <div style="flex:1; min-width:160px;">
@@ -1153,10 +1153,10 @@ export function renderInvitePage() {
 
         <details style="margin-top:14px; border-top:1px solid var(--border); padding-top:12px;">
           <summary style="cursor:pointer; font-weight:700; color:var(--primary);">Connect My Agent (Zero Copy-Paste Mode)</summary>
-          <p class="muted" style="margin:8px 0;">Connect ChatGPT (Custom GPT Actions), Claude, or any HTTP/OpenAPI agent once using the details below. After connecting, just tell your AI: <em>"Draw and solve a Proof Commons mission"</em> — no copy-paste needed.</p>
+          <p class="muted" style="margin:8px 0;">Connect ChatGPT (Custom GPT Actions), Claude, or any HTTP/OpenAPI agent using the mission-scoped details below so your agent goes straight to the mission you selected above.</p>
           <div style="display:grid; gap:8px; font-size:13px;">
             <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
-              <span><strong>OpenAPI Schema URL:</strong> <code id="agent-openapi-url"></code></span>
+              <span><strong>Mission-Scoped OpenAPI URL:</strong> <code id="agent-openapi-url"></code></span>
               <button type="button" class="chip-btn" onclick="copyTextEl('agent-openapi-url')">Copy</button>
             </div>
             <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
@@ -1166,6 +1166,10 @@ export function renderInvitePage() {
             <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
               <span><strong>Unified Agent Endpoint:</strong> <code id="agent-rpc-url"></code></span>
               <button type="button" class="chip-btn" onclick="copyTextEl('agent-rpc-url')">Copy</button>
+            </div>
+            <div class="row" style="justify-content:space-between; background:var(--bg); padding:8px 10px; border-radius:8px; border:1px solid var(--border);">
+              <span><strong>Tell Your Connected Agent:</strong> <code id="agent-mission-cmd"></code></span>
+              <button type="button" class="chip-btn" onclick="copyTextEl('agent-mission-cmd')">Copy</button>
             </div>
           </div>
         </details>
@@ -1279,7 +1283,6 @@ export function renderInvitePage() {
         document.getElementById('workspace').classList.remove('hidden');
         document.getElementById('inv-label').textContent = data.invite.label;
         document.getElementById('inv-quota').textContent = (data.invite.quota_total - data.invite.quota_used) + ' contributions left';
-        document.getElementById('agent-openapi-url').textContent = location.origin + '/openapi.json';
         document.getElementById('agent-bearer-token').textContent = inviteToken;
         document.getElementById('agent-rpc-url').textContent = location.origin + '/v1/agent';
 
@@ -1288,6 +1291,7 @@ export function renderInvitePage() {
         if (requestedMissionId && Array.from(sel.options).some(o => o.value === requestedMissionId)) {
           sel.value = requestedMissionId;
         }
+        updateAgentConfig();
         if (requestedHelpId) {
           drawTask(requestedHelpId);
         } else if (requestedScope === 'full_mission') {
@@ -1295,6 +1299,16 @@ export function renderInvitePage() {
         } else if (data.active_assignment) {
           showAssignment(data.active_assignment);
         }
+      }
+
+      function updateAgentConfig() {
+        const sel = document.getElementById('w-mission');
+        const mId = sel?.value || '';
+        const mTitle = sel?.options?.[sel.selectedIndex]?.textContent || mId;
+        document.getElementById('agent-openapi-url').textContent = location.origin + '/openapi.json' + (mId ? '?mission_id=' + encodeURIComponent(mId) : '');
+        document.getElementById('agent-mission-cmd').textContent = mId
+          ? 'Work on Proof Commons mission "' + mTitle + '" (mission_id: ' + mId + '). Draw it, pursue a complete solution (or inspect open subproblems), verify your work, and submit your findings.'
+          : 'Draw and work on a Proof Commons mission.';
       }
 
       async function drawTask(specificHelpId = null, scope = 'auto') {

@@ -207,12 +207,28 @@ assert.equal(urbanSubmit.status, 200);
 assert.equal(urbanSubmit.json.addresses_full_mission, true);
 
 // Scenario 6: Existing UI pages, OpenAPI spec, and mission/claim endpoints remain usable
-for (const path of ['/', '/invite', '/m/multi-black-hole-equilibrium', '/openapi.json', '/api/missions/multi-black-hole-equilibrium']) {
+for (const path of ['/', '/invite', '/m/multi-black-hole-equilibrium', '/openapi.json', '/api/missions/multi-black-hole-equilibrium', '/api/missions/hadwiger-nelson-5-chromatic-minimization']) {
   const r = await call(path);
   assert.equal(r.status, 200, `Expected 200 for ${path}`);
 }
 const invitePage = await call('/invite');
 assert.ok(invitePage.text.includes('Work on Full Mission'));
 assert.ok(invitePage.text.includes('Submit as a candidate solution to the full mission'));
+assert.ok(invitePage.text.includes('updateAgentConfig()'));
 
-console.log('ALL_6_SCENARIOS_PASSED');
+// Scenario 7: Mission-scoped OpenAPI & draw targets the exact chosen mission (Hadwiger-Nelson)
+const scopedSpec = await call('/openapi.json?mission_id=mission-hadwiger-nelson-5');
+assert.equal(scopedSpec.status, 200);
+assert.ok(scopedSpec.json.paths['/api/agent/v1/missions/mission-hadwiger-nelson-5/draw']);
+assert.equal(scopedSpec.json.components.schemas.DrawRequest.properties.mission_id.default, 'mission-hadwiger-nelson-5');
+
+const scopedDraw = await call('/api/agent/v1/missions/mission-hadwiger-nelson-5/draw', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { scope: 'full_mission', model_family: 'Claude' },
+});
+assert.equal(scopedDraw.status, 200);
+assert.equal(scopedDraw.json.mission.id, 'mission-hadwiger-nelson-5');
+assert.equal(scopedDraw.json.scope, 'full_mission');
+
+console.log('ALL_7_SCENARIOS_PASSED');

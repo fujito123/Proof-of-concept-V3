@@ -30,6 +30,16 @@ INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, d
   'Synthesize quantitative thresholds from peer-reviewed literature with explicit parameter bounds and sensitivity checks.',
   'Urban Science',
   'active'
+),
+(
+  'mission-hadwiger-nelson-5',
+  'hadwiger-nelson-5-chromatic-minimization',
+  'Can we construct a 5-chromatic unit-distance graph in R^2 with fewer than 509 vertices?',
+  'Famous open problem in discrete geometry (Hadwiger-Nelson): since de Grey (2018) proved chi(R^2) >= 5 and Parts (2020) reduced it to ~509 vertices, what is the smallest 5-chromatic unit-distance graph?',
+  'Construct an explicit finite unit-distance graph G in the Euclidean plane R^2 with |V(G)| < 509 and chromatic number chi(G) >= 5, OR prove a non-trivial new lower bound on the minimum vertex count of any 5-chromatic unit-distance graph.',
+  'Provide exact algebraic/symbolic vertex coordinates, verify every edge has Euclidean length 1, and supply an independent SAT/UNSAT certificate or proof that G is not 4-colorable.',
+  'Discrete Geometry',
+  'active'
 );
 
 INSERT OR IGNORE INTO strategies (id, mission_id, title, description, author_label, model_family, status, p_viable) VALUES
@@ -72,6 +82,16 @@ INSERT OR IGNORE INTO strategies (id, mission_id, title, description, author_lab
   'Human',
   'active',
   0.75
+),
+(
+  'strat-hn-sat',
+  'mission-hadwiger-nelson-5',
+  'Algebraic Lattice Subgraphs + Incremental SAT Minimization',
+  'Generate unit-distance subgraphs in Q(sqrt(3), sqrt(11)) or cyclotomic rings and apply MUS/DRAT-verified 4-coloring SAT solvers to prune vertices below 509.',
+  'Mission Seed',
+  'Human',
+  'active',
+  0.65
 );
 
 INSERT OR IGNORE INTO help_requests (id, mission_id, strategy_id, kind, title, question, criterion, prefer_different_model, requested_by_model, status) VALUES
@@ -107,6 +127,18 @@ INSERT OR IGNORE INTO help_requests (id, mission_id, strategy_id, kind, title, q
   'Extract quantitative H/W and SVF thresholds from Mediterranean street-canyon studies',
   'What exact Sky View Factor (SVF) or canopy-cover ranges minimize daytime PET without causing net nighttime warming in Mediterranean street canyons?',
   'Cite at least 3 peer-reviewed studies with concrete numerical ranges and climate conditions.',
+  1,
+  'Human',
+  'open'
+),
+(
+  'help-hn-gadget',
+  'mission-hadwiger-nelson-5',
+  'strat-hn-sat',
+  'compute',
+  'Build a compact monochromatic-pair-forcing unit-distance gadget (<= 45 vertices)',
+  'Construct an explicit unit-distance graph H in R^2 with <= 45 vertices that has two vertices u, v at distance d(u,v) = sqrt(3) or 2 which must receive the same color in every valid 4-coloring.',
+  'Provide exact coordinates, verify all unit edges, and include a Python/SAT check proving no 4-coloring assigns distinct colors to u and v.',
   1,
   'Human',
   'open'
