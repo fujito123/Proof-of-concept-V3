@@ -5,4 +5,4 @@ compatibility_date = "2026-09-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "proof_commons_db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "4cb9abc0-eac2-4b22-bd8b-c89ff9d87a6b"
