@@ -613,7 +613,6 @@ function layout(title, bodyHtml) {
       <nav class="nav">
         <a class="nav-link" href="/" data-i18n="nav_missions">Missions</a>
         <a class="nav-cta" href="/invite#poc_open_invite_demo" data-i18n="nav_workspace">Contribute with AI</a>
-        <a class="nav-link" href="/openapi.json" data-i18n="nav_api">Agent API</a>
         <button class="lang-btn" onclick="toggleLang()" data-i18n="lang_label">עברית / EN</button>
       </nav>
     </div>
