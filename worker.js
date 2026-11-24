@@ -72,6 +72,58 @@ function parseSubmission(raw) {
   };
 }
 
+function curlingNumber(seq) {
+  const n = seq.length;
+  let best = 1;
+  for (let L = 1; L <= Math.floor(n / 2); L++) {
+    if (best * L >= n) break;
+    let k = 1;
+    while (n - (k + 1) * L >= 0) {
+      let eq = true;
+      const a = n - (k + 1) * L;
+      const b = n - L;
+      for (let i = 0; i < L; i++) {
+        if (seq[a + i] !== seq[b + i]) { eq = false; break; }
+      }
+      if (!eq) break;
+      k++;
+    }
+    if (k > best) best = k;
+  }
+  return best;
+}
+
+function curlingTailLength(str49) {
+  const seq = str49.split("").map(Number);
+  let steps = 0;
+  while (steps < 500) {
+    const k = curlingNumber(seq);
+    if (k === 1) break;
+    seq.push(k);
+    steps++;
+  }
+  return steps;
+}
+
+async function runAutoVerifier(env, { missionId, claimId, finding, how_to_check }) {
+  if (missionId !== "mission-curling-49") return null;
+  const combined = `${finding || ""}\n${how_to_check || ""}`;
+  const matches = combined.match(/\b[23]{49}\b/g);
+  if (!matches) return null;
+  for (const candidate of matches) {
+    const tail = curlingTailLength(candidate);
+    if (tail >= 131) {
+      const notes = `Auto-verified 49-symbol {2,3} witness (${candidate}) with exact curling tail length ${tail} >= 131.`;
+      await env.DB.prepare(
+        `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, notes) VALUES (?, ?, 'auto-verifier', 'AutoVerifier', 'verified', ?)`
+      ).bind(uid("rev"), claimId, notes).run();
+      await env.DB.prepare(`UPDATE claims SET verification_status = 'verified' WHERE id = ?`).bind(claimId).run();
+      return { verified: true, tail, witness: candidate };
+    }
+  }
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -323,7 +375,37 @@ export default {
           WHERE (? IS NULL OR m.id = ?) AND m.status = 'active'
           ORDER BY m.created_at DESC
         `).bind(invite.mission_id, invite.mission_id).all();
-        return json({ invite, missions });
+
+        let active_assignment = null;
+        const agentSession = String(body.agent_session || "").trim();
+        if (agentSession) {
+          const openAssign = await env.DB.prepare(`
+            SELECT a.*, h.kind, h.title, h.question, h.criterion
+            FROM assignments a
+            JOIN help_requests h ON h.id = a.help_request_id
+            WHERE a.invite_token = ? AND a.agent_session = ? AND a.status = 'drawn' AND h.status = 'open'
+              AND a.created_at >= datetime('now', '-24 hours')
+            ORDER BY a.created_at DESC
+            LIMIT 1
+          `).bind(invite.token, agentSession).first();
+          if (openAssign) {
+            const { results: prior_claims } = await env.DB.prepare(
+              `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
+            ).bind(openAssign.mission_id).all();
+            active_assignment = {
+              id: openAssign.id,
+              mission_id: openAssign.mission_id,
+              help_request_id: openAssign.help_request_id,
+              kind: openAssign.kind,
+              title: openAssign.title,
+              question: openAssign.question,
+              criterion: openAssign.criterion,
+              prior_claims,
+              resumed: true,
+            };
+          }
+        }
+        return json({ invite, missions, active_assignment });
       }
 
       if (method === "POST" && path === "/api/invite/draw") {
@@ -336,8 +418,42 @@ export default {
         const missionId = body.mission_id || invite.mission_id;
         const modelFamily = String(body.model_family || "Other");
         const agentSession = String(body.agent_session || uid("sess"));
-
         const requestedHelpId = body.help_request_id ? String(body.help_request_id).trim() : null;
+
+        // Resume active drawn assignment for this session/mission/task to prevent double-tap duplicates
+        const existingAssign = requestedHelpId
+          ? await env.DB.prepare(`
+              SELECT a.*, h.kind, h.title, h.question, h.criterion
+              FROM assignments a JOIN help_requests h ON h.id = a.help_request_id
+              WHERE a.invite_token = ? AND a.agent_session = ? AND a.help_request_id = ? AND a.status = 'drawn' AND h.status = 'open'
+              ORDER BY a.created_at DESC LIMIT 1
+            `).bind(invite.token, agentSession, requestedHelpId).first()
+          : await env.DB.prepare(`
+              SELECT a.*, h.kind, h.title, h.question, h.criterion
+              FROM assignments a JOIN help_requests h ON h.id = a.help_request_id
+              WHERE a.invite_token = ? AND a.agent_session = ? AND a.mission_id = ? AND a.status = 'drawn' AND h.status = 'open'
+                AND a.created_at >= datetime('now', '-24 hours')
+              ORDER BY a.created_at DESC LIMIT 1
+            `).bind(invite.token, agentSession, missionId).first();
+
+        if (existingAssign) {
+          const { results: prior_claims } = await env.DB.prepare(
+            `SELECT id, outcome, finding, how_to_check, remaining_gap, verification_status FROM claims WHERE mission_id = ? ORDER BY created_at DESC LIMIT 5`
+          ).bind(existingAssign.mission_id).all();
+          return json({
+            assignment: {
+              id: existingAssign.id,
+              mission_id: existingAssign.mission_id,
+              help_request_id: existingAssign.help_request_id,
+              kind: existingAssign.kind,
+              title: existingAssign.title,
+              question: existingAssign.question,
+              criterion: existingAssign.criterion,
+              prior_claims,
+              resumed: true,
+            },
+          });
+        }
 
         // Smart draw: if a specific open help_request_id is requested, use it;
         // otherwise pick an open help_request prioritizing a DIFFERENT model family.
@@ -386,7 +502,14 @@ export default {
           .bind(body.assignment_id, body.token)
           .first();
         if (!assign) return json({ error: "Assignment not found." }, 404);
-        if (assign.status === "submitted") return json({ error: "Assignment already submitted." }, 409);
+        if (assign.status === "submitted" && assign.submitted_claim_id) {
+          const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+          return json({
+            claim_id: assign.submitted_claim_id,
+            idempotent_replay: true,
+            receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${assign.submitted_claim_id}`,
+          });
+        }
 
         const parsed = parseSubmission(body.raw_submission);
         if (!parsed.finding || parsed.finding.length < 3) {
@@ -432,6 +555,13 @@ export default {
           .bind(assign.invite_token)
           .run();
 
+        const auto_verified = await runAutoVerifier(env, {
+          missionId: assign.mission_id,
+          claimId,
+          finding: parsed.finding,
+          how_to_check: parsed.how_to_check,
+        });
+
         // Optional non-blocking cross-model follow-up help request (allowed for guests!)
         const followUp = String(body.follow_up_question || "").trim();
         if (followUp.length >= 3) {
@@ -446,6 +576,7 @@ export default {
         const mission = await env.DB.prepare(`SELECT slug FROM missions WHERE id = ?`).bind(assign.mission_id).first();
         return json({
           claim_id: claimId,
+          auto_verified,
           receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`,
         });
       }
@@ -583,6 +714,13 @@ export default {
           await env.DB.prepare(`UPDATE assignments SET status = 'submitted', submitted_claim_id = ? WHERE id = ?`).bind(claimId, assign.id).run();
           await env.DB.prepare(`UPDATE invites SET quota_used = quota_used + 1 WHERE token = ?`).bind(assign.invite_token).run();
 
+          const auto_verified = await runAutoVerifier(env, {
+            missionId: assign.mission_id,
+            claimId,
+            finding: parsed.finding,
+            how_to_check: parsed.how_to_check,
+          });
+
           const followUp = String(payload?.follow_up_question || "").trim();
           let follow_up_help_id = null;
           if (followUp.length >= 3) {
@@ -599,6 +737,7 @@ export default {
           return json({
             claim_id: claimId,
             status: "submitted",
+            auto_verified,
             follow_up_help_id,
             receipt_url: `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`,
           });

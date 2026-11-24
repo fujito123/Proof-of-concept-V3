@@ -1189,7 +1189,7 @@ export function renderInvitePage() {
         const res = await fetch('/api/invite/exchange', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ token })
+          body: JSON.stringify({ token, agent_session: sessionId })
         });
         const data = await res.json();
         if (!res.ok) {
