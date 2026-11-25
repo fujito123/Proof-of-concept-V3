@@ -530,6 +530,7 @@ function showToast(msg) {
 const DICT = {
   he: {
     nav_missions: 'משימות מחקר',
+    nav_good_q: 'שאלה טובה',
     nav_workspace: 'מרחב תרומה (AI)',
     nav_api: 'ממשק סוכנים',
     hero_eyebrow: 'מדע פתוח מבוזר · אדם + בינה מלאכותית',
@@ -548,6 +549,7 @@ const DICT = {
   },
   en: {
     nav_missions: 'Missions',
+    nav_good_q: 'Good Question',
     nav_workspace: 'Contribute with AI',
     nav_api: 'Agent API',
     hero_eyebrow: 'Distributed Open Science · Human + AI',
@@ -666,6 +668,7 @@ function layout(title, bodyHtml) {
       </a>
       <nav class="nav">
         <a class="nav-link" href="/" data-i18n="nav_missions">Missions</a>
+        <a class="nav-link" href="/good-question" data-i18n="nav_good_q">Good Question</a>
         <a class="nav-cta" href="/invite#poc_open_invite_demo" data-i18n="nav_workspace">Contribute with AI</a>
         <button class="lang-btn" onclick="toggleLang()" data-i18n="lang_label">עברית / EN</button>
       </nav>
@@ -1753,3 +1756,202 @@ export function renderInvitePage() {
   `;
   return layout("Contributor Workspace", body);
 }
+
+export function renderGoodQuestionPage() {
+  const body = `
+    <section class="hero">
+      <div class="hero-eyebrow">Good Question · Synthesis &amp; Hypothesis Studio</div>
+      <h1>Unify Results. Discover the Next Good Question.</h1>
+      <p>Connect findings, unresolved gaps, and cross-domain ideas from across all missions—check novelty automatically, and launch strong follow-up hypotheses as live missions in one click.</p>
+      <div class="row">
+        <button style="background:#ffffff;color:#1e1b4b;" onclick="document.getElementById('gq-topic').focus()">Start Synthesizing</button>
+        <a class="btn secondary" style="background:rgba(255,255,255,0.12);color:#ffffff;border-color:rgba(255,255,255,0.22);" href="/">Browse Live Missions</a>
+      </div>
+    </section>
+
+    <div class="card accent-card" style="padding:22px;">
+      <h2 style="margin-top:0;">Synthesize Evidence &amp; Propose Follow-Up Hypotheses</h2>
+      <p class="muted">Enter a theme, optionally pick specific missions to bridge, or paste external notes/papers. Good Question pulls related findings &amp; stalled gaps from the database and proposes falsifiable next questions.</p>
+
+      <div class="row" style="margin-bottom:10px;">
+        <span class="muted" style="font-size:12.5px; font-weight:700;">Quick themes:</span>
+        <button type="button" class="chip-btn" onclick="setTopic('AI over-reliance, prompt injection, and hallucination verification')">AI Reliability &amp; Verification</button>
+        <button type="button" class="chip-btn" onclick="setTopic('Urban heat mitigation, cool roofs, solar batteries, and street shade')">Urban Cooling &amp; Energy</button>
+        <button type="button" class="chip-btn" onclick="setTopic('SAT verification, combinatorics, and interactive proof games')">SAT, Proofs &amp; Games</button>
+        <button type="button" class="chip-btn" onclick="setTopic('Participatory voting fairness and formal Arrow impossibility')">Voting &amp; Civic Tech</button>
+      </div>
+
+      <label>Topic / Focus Theme
+        <input id="gq-topic" placeholder="e.g., How can AI verification rubrics improve high-school curricula or civic law translation?">
+      </label>
+
+      <label>Optional: Select Specific Missions to Unify (leave empty to auto-match via semantic proximity)
+        <div id="gq-mission-picker" style="max-height:170px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--bg); margin-top:4px;">
+          <span class="muted">Loading missions...</span>
+        </div>
+      </label>
+
+      <label>Optional: Paste External Findings, Paper Excerpts, or Contradictions
+        <textarea id="gq-notes" placeholder="Paste any extra result, counterexample, or observation you want to unify with existing missions..."></textarea>
+      </label>
+
+      <div class="row">
+        <button id="gq-run-btn" onclick="runSynthesis()">Unify &amp; Generate Good Questions</button>
+        <span id="gq-status" class="muted"></span>
+      </div>
+    </div>
+
+    <div id="gq-latest"></div>
+
+    <div class="row" style="justify-content:space-between; margin-top:28px;">
+      <h2 style="margin:0;">Synthesized Good Questions Feed</h2>
+      <span class="muted" id="gq-feed-count"></span>
+    </div>
+    <div id="gq-feed" style="margin-top:12px;"><p class="muted">Loading saved hypotheses...</p></div>
+
+    <script>
+      let gqMissions = [];
+      let gqFeed = [];
+
+      function setTopic(t) {
+        document.getElementById('gq-topic').value = t;
+      }
+
+      async function loadGoodQuestionStudio() {
+        const [mRes, gRes] = await Promise.all([fetch('/api/missions'), fetch('/api/good-questions')]);
+        const mData = await mRes.json();
+        const gData = await gRes.json();
+        gqMissions = mData.missions || [];
+        gqFeed = gData.questions || [];
+        renderMissionPicker();
+        renderFeed();
+      }
+
+      function renderMissionPicker() {
+        const el = document.getElementById('gq-mission-picker');
+        if (!el) return;
+        el.innerHTML = gqMissions.map(function(m) {
+          return '<label style="display:flex; align-items:center; gap:8px; margin:4px 0; font-weight:500; font-size:13px; cursor:pointer;">' +
+            '<input type="checkbox" class="gq-m-cb" value="' + escHtml(m.id) + '" style="width:auto; margin:0;">' +
+            '<span><span class="badge">' + escHtml(m.domain) + '</span> ' + escHtml(m.title) + '</span>' +
+          '</label>';
+        }).join('');
+      }
+
+      function modeLabel(mode) {
+        if (mode === 'lean4') return 'Gate: Lean 4 Proof';
+        if (mode === 'computational') return 'Gate: Code / Playtest';
+        return 'Gate: Criterion Peer Review';
+      }
+
+      function renderQuestionCard(q) {
+        const novelty = typeof q.novelty_pct === 'number' ? q.novelty_pct : Math.round((q.novelty_score || 1) * 100);
+        const noveltyClass = novelty >= 65 ? 'ok' : 'warn';
+        const sources = Array.isArray(q.source_ids) ? q.source_ids : [];
+        const launchedSlug = q.launched_mission_slug || '';
+        return '<div class="card" id="gq-' + escHtml(q.id) + '">' +
+          '<div class="row" style="justify-content:space-between; margin-bottom:8px;">' +
+            '<div class="row" style="gap:6px;">' +
+              '<span class="badge primary">' + escHtml(q.domain || 'General') + '</span>' +
+              '<span class="badge">' + escHtml(modeLabel(q.verification_mode)) + '</span>' +
+              '<span class="badge ' + noveltyClass + '">' + escHtml(novelty) + '% Novel</span>' +
+            '</div>' +
+            '<span class="muted" style="font-size:12px;">Engine: ' + escHtml(q.engine || 'synthesis') + '</span>' +
+          '</div>' +
+          '<h3 style="margin:4px 0 8px;" dir="auto">' + escHtml(q.title) + '</h3>' +
+          '<p style="margin:4px 0;" dir="auto"><strong>Hypothesis:</strong> ' + escHtml(q.hypothesis) + '</p>' +
+          '<p style="margin:6px 0;" dir="auto"><strong>Precise Next Question:</strong> ' + escHtml(q.question) + '</p>' +
+          '<p class="muted" style="margin:4px 0;" dir="auto"><strong>Completion Criterion:</strong> ' + escHtml(q.criterion) + '</p>' +
+          (q.why_interesting ? '<p class="muted" style="margin:4px 0;" dir="auto"><strong>Why Interesting:</strong> ' + escHtml(q.why_interesting) + '</p>' : '') +
+          (sources.length ? '<p class="muted" style="margin:6px 0 0; font-size:12px;"><strong>Grounded in:</strong> ' + sources.map(function(s){ return '<code>' + escHtml(s) + '</code>'; }).join(' · ') + '</p>' : '') +
+          '<div class="row" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">' +
+            (q.launched_mission_id
+              ? '<a class="btn" href="' + (launchedSlug ? '/m/' + encodeURIComponent(launchedSlug) : '/') + '">Open Launched Mission →</a>'
+              : '<button onclick="launchMission(\\'' + escHtml(q.id) + '\\')">Launch as Live Mission</button>') +
+            '<button class="secondary" onclick="endorseQuestion(\\'' + escHtml(q.id) + '\\')">▲ Endorse (<span id="gq-end-' + escHtml(q.id) + '">' + escHtml(q.endorsements || 0) + '</span>)</button>' +
+          '</div>' +
+        '</div>';
+      }
+
+      async function runSynthesis() {
+        const btn = document.getElementById('gq-run-btn');
+        const st = document.getElementById('gq-status');
+        btn.disabled = true;
+        st.textContent = 'Unifying findings and checking novelty...';
+        try {
+          const selectedMissions = Array.from(document.querySelectorAll('.gq-m-cb:checked')).map(function(c){ return c.value; });
+          const payload = {
+            topic: (document.getElementById('gq-topic')?.value || '').trim(),
+            mission_ids: selectedMissions,
+            external_notes: (document.getElementById('gq-notes')?.value || '').trim(),
+            count: 3
+          };
+          const res = await fetch('/api/good-questions/synthesize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            st.textContent = data.error || 'Synthesis failed';
+            return;
+          }
+          const latest = document.getElementById('gq-latest');
+          const srcLinks = ((data.sources && data.sources.missions) || []).map(function(m) {
+            return '<a class="chip-btn" href="/m/' + encodeURIComponent(m.slug) + '" target="_blank">' + escHtml(m.title.slice(0, 48)) + '</a>';
+          }).join(' ');
+          latest.innerHTML =
+            '<div class="card" style="border-color:var(--primary-border); background:var(--primary-soft);">' +
+              '<div class="row" style="justify-content:space-between;"><strong>Unified Evidence Synthesis</strong><span class="badge primary">' + escHtml(data.engine) + '</span></div>' +
+              '<p style="margin:8px 0;" dir="auto">' + escHtml(data.synthesis_summary) + '</p>' +
+              (srcLinks ? '<div class="row" style="gap:6px;">' + srcLinks + '</div>' : '') +
+            '</div>' +
+            (data.questions || []).map(renderQuestionCard).join('');
+          st.textContent = 'Generated ' + (data.questions || []).length + ' follow-up hypotheses!';
+          if (typeof showToast === 'function') showToast('Good Questions generated!');
+          const gRes = await fetch('/api/good-questions');
+          const gData = await gRes.json();
+          gqFeed = gData.questions || [];
+          renderFeed();
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      function renderFeed() {
+        const el = document.getElementById('gq-feed');
+        const cnt = document.getElementById('gq-feed-count');
+        if (cnt) cnt.textContent = gqFeed.length + ' saved';
+        if (!gqFeed.length) {
+          el.innerHTML = '<div class="card muted-card"><p class="muted" style="margin:0;">No hypotheses synthesized yet — pick a theme above and generate the first batch!</p></div>';
+          return;
+        }
+        el.innerHTML = gqFeed.map(renderQuestionCard).join('');
+      }
+
+      async function endorseQuestion(id) {
+        const res = await fetch('/api/good-questions/' + encodeURIComponent(id) + '/endorse', { method: 'POST' });
+        const d = await res.json();
+        if (res.ok) {
+          document.querySelectorAll('#gq-end-' + CSS.escape(id)).forEach(function(n){ n.textContent = d.endorsements; });
+          if (typeof showToast === 'function') showToast('Endorsed!');
+        }
+      }
+
+      async function launchMission(id) {
+        const res = await fetch('/api/good-questions/' + encodeURIComponent(id) + '/launch', { method: 'POST' });
+        const d = await res.json();
+        if (res.ok && d.mission) {
+          if (typeof showToast === 'function') showToast('Launched as a live mission!');
+          window.location.href = '/m/' + encodeURIComponent(d.mission.slug);
+        } else {
+          if (typeof showToast === 'function') showToast(d.error || 'Launch failed');
+        }
+      }
+
+      loadGoodQuestionStudio();
+    </script>
+  `;
+  return layout("Good Question", body);
+}
+

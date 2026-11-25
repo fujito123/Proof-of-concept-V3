@@ -655,4 +655,81 @@ assert.ok(listRes.json.missions.length >= 34, `Expected >= 34 missions, got ${li
 const modesSeen = new Set(listRes.json.missions.map(m => m.verification_mode));
 assert.ok(modesSeen.has('lean4') && modesSeen.has('computational') && modesSeen.has('criterion_review'));
 
-console.log('ALL_11_SCENARIOS_PASSED');
+// Scenario 12: Good Question — unify results, generate follow-up hypotheses, endorse, and launch as live mission
+const gqPage = await call('/good-question');
+assert.equal(gqPage.status, 200);
+assert.ok(gqPage.text.includes('Unify Results. Discover the Next Good Question.'));
+
+const synthDet = await call('/api/good-questions/synthesize', {
+  method: 'POST',
+  body: {
+    topic: 'AI over-reliance and prompt injection verification',
+    mission_ids: ['mission-psych-ai-overreliance', 'mission-agent-injection-bench'],
+    count: 3,
+  },
+});
+assert.equal(synthDet.status, 200);
+assert.equal(synthDet.json.engine, 'deterministic');
+assert.ok(synthDet.json.synthesis_summary.length > 20);
+assert.equal(synthDet.json.questions.length, 3);
+assert.ok(typeof synthDet.json.questions[0].novelty_pct === 'number');
+
+// Mock Workers AI LLM path for Good Question
+const mockSynthAI = {
+  async run(model, input) {
+    if (model.includes('bge-base')) return mockAI.run(model, input);
+    return {
+      response: JSON.stringify({
+        synthesis_summary: 'Bridging AI over-reliance scales with prompt-injection harnesses shows verification friction shapes both human trust and security.',
+        questions: [{
+          title: 'Does adversarial prompt-injection training improve human AI trust calibration?',
+          hypothesis: 'Users exposed to 5 realistic indirect prompt injections score higher on Verification Effort without abandoning useful AI tools.',
+          question: 'Run a controlled 2-arm study testing whether brief hands-on prompt-injection red-teaming improves scores on the AI Over-Reliance Scale.',
+          criterion: 'Pre-registered scoring rubric with measured delta across all 4 factors.',
+          domain: 'Psychology × AI Security',
+          verification_mode: 'criterion_review',
+          why_interesting: 'Unifies behavioral psychology measurement with concrete agent security benchmarks.',
+          source_ids: ['mission-psych-ai-overreliance', 'mission-agent-injection-bench'],
+        }],
+      }),
+    };
+  },
+};
+const synthAi = await callEnv({ AI: mockSynthAI }, '/api/good-questions/synthesize', {
+  method: 'POST',
+  body: { topic: 'AI trust calibration and security', count: 1 },
+});
+assert.equal(synthAi.status, 200);
+assert.equal(synthAi.json.engine, 'workers_ai');
+assert.equal(synthAi.json.questions.length, 1);
+const gqId = synthAi.json.questions[0].id;
+
+// Endorse & Launch as Live Mission (idempotent)
+const endRes = await call(`/api/good-questions/${gqId}/endorse`, { method: 'POST' });
+assert.equal(endRes.status, 200);
+assert.equal(endRes.json.endorsements, 1);
+
+const launch1 = await call(`/api/good-questions/${gqId}/launch`, { method: 'POST' });
+assert.equal(launch1.status, 201);
+assert.equal(launch1.json.already_launched, false);
+assert.ok(launch1.json.mission.slug);
+
+const launch2 = await call(`/api/good-questions/${gqId}/launch`, { method: 'POST' });
+assert.equal(launch2.status, 200);
+assert.equal(launch2.json.already_launched, true);
+assert.equal(launch2.json.mission.id, launch1.json.mission.id);
+
+// Feed lists saved questions and agent RPC synthesize_questions works
+const gqList = await call('/api/good-questions');
+assert.equal(gqList.status, 200);
+assert.ok(gqList.json.questions.some(q => q.id === gqId && q.launched_mission_id === launch1.json.mission.id));
+
+const gqAgent = await call('/v1/agent', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { action: 'synthesize_questions', topic: 'Urban shade and cool roofs', count: 2 },
+});
+assert.equal(gqAgent.status, 200);
+assert.equal(gqAgent.json.questions.length, 2);
+
+console.log('ALL_12_SCENARIOS_PASSED');

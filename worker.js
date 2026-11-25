@@ -1,6 +1,7 @@
-import { renderHomePage, renderMissionPage, renderInvitePage } from "./ui.js";
+import { renderHomePage, renderMissionPage, renderInvitePage, renderGoodQuestionPage } from "./ui.js";
 import { findRelatedIdeas, safeRelatedIdeas, indexIdea, semanticAvailable } from "./similarity.js";
 import { CATALOG_MISSIONS } from "./catalog_missions.js";
+import { synthesizeGoodQuestions } from "./good_question.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -285,6 +286,26 @@ async function ensureSchemaAndSeed(env) {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `).run();
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS good_questions (
+        id TEXT PRIMARY KEY,
+        topic TEXT NOT NULL,
+        synthesis_summary TEXT NOT NULL,
+        title TEXT NOT NULL,
+        hypothesis TEXT NOT NULL,
+        question TEXT NOT NULL,
+        criterion TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'General',
+        verification_mode TEXT NOT NULL DEFAULT 'criterion_review',
+        why_interesting TEXT NOT NULL DEFAULT '',
+        source_ids_json TEXT NOT NULL DEFAULT '[]',
+        novelty_score REAL NOT NULL DEFAULT 1.0,
+        engine TEXT NOT NULL DEFAULT 'deterministic',
+        launched_mission_id TEXT REFERENCES missions(id) ON DELETE SET NULL,
+        endorsements INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `).run();
   } catch (_) { /* best effort */ }
   try {
     await env.DB.prepare(`
@@ -380,6 +401,9 @@ export default {
       // --- HTML Pages ---
       if (method === "GET" && path === "/") {
         return html(renderHomePage());
+      }
+      if (method === "GET" && path === "/good-question") {
+        return html(renderGoodQuestionPage());
       }
       if (method === "GET" && path === "/invite") {
         // Always 200 OK even with no query params (fragment #token handled client-side)
@@ -517,15 +541,86 @@ export default {
                 responses: { "200": { description: "Ranked related ideas with similarity score, match type (keyword / semantic), shared terms, and stable links" } },
               },
             },
+            "/api/agent/v1/good-questions/synthesize": {
+              post: {
+                operationId: "synthesizeGoodQuestions",
+                summary: "Unify existing missions, claims, and unresolved gaps to propose grounded, falsifiable follow-up hypotheses ('Good Questions') with novelty checks",
+                responses: { "200": { description: "Unified synthesis summary and ranked follow-up hypotheses" } },
+              },
+            },
             "/v1/agent": {
               post: {
                 operationId: "agentRpc",
-                summary: "Unified single-endpoint agent action (list_missions, draw_task, open_assignment, submit_handoff, request_help, find_related).",
+                summary: "Unified single-endpoint agent action (list_missions, draw_task, open_assignment, submit_handoff, request_help, find_related, synthesize_questions).",
                 responses: { "200": { description: "Action result" } },
               },
             },
           },
         });
+      }
+
+      // --- Good Question API (Unify results & synthesize follow-up hypotheses) ---
+      if (method === "GET" && path === "/api/good-questions") {
+        const { results } = await env.DB.prepare(`
+          SELECT g.*, m.slug AS launched_mission_slug
+          FROM good_questions g
+          LEFT JOIN missions m ON m.id = g.launched_mission_id
+          ORDER BY g.created_at DESC
+          LIMIT 50
+        `).all();
+        const questions = results.map(r => {
+          let source_ids = [];
+          try { source_ids = JSON.parse(r.source_ids_json || "[]"); } catch (_) {}
+          return {
+            ...r,
+            source_ids,
+            novelty_pct: Math.round(Number(r.novelty_score ?? 1) * 100),
+          };
+        });
+        return json({ questions });
+      }
+
+      if (method === "POST" && path === "/api/good-questions/synthesize") {
+        const body = await request.json().catch(() => ({}));
+        const result = await synthesizeGoodQuestions(env, body);
+        return json(result, 200);
+      }
+
+      if (method === "POST" && path.match(/^\/api\/good-questions\/([^/]+)\/endorse$/)) {
+        const gqId = decodeURIComponent(path.match(/^\/api\/good-questions\/([^/]+)\/endorse$/)[1]);
+        const row = await env.DB.prepare(`SELECT id FROM good_questions WHERE id = ?`).bind(gqId).first();
+        if (!row) return json({ error: "Good Question not found" }, 404);
+        await env.DB.prepare(`UPDATE good_questions SET endorsements = endorsements + 1 WHERE id = ?`).bind(gqId).run();
+        const updated = await env.DB.prepare(`SELECT id, endorsements FROM good_questions WHERE id = ?`).bind(gqId).first();
+        return json({ ok: true, id: updated.id, endorsements: updated.endorsements });
+      }
+
+      if (method === "POST" && path.match(/^\/api\/good-questions\/([^/]+)\/launch$/)) {
+        const gqId = decodeURIComponent(path.match(/^\/api\/good-questions\/([^/]+)\/launch$/)[1]);
+        const gq = await env.DB.prepare(`SELECT * FROM good_questions WHERE id = ?`).bind(gqId).first();
+        if (!gq) return json({ error: "Good Question not found" }, 404);
+        if (gq.launched_mission_id) {
+          const existing = await env.DB.prepare(`SELECT * FROM missions WHERE id = ?`).bind(gq.launched_mission_id).first();
+          if (existing) return json({ mission: existing, already_launched: true });
+        }
+        const mId = uid("mission");
+        const slug = slugify(gq.title) + "-" + mId.slice(-4);
+        const mode = normalizeVerificationMode(gq.verification_mode);
+        const summary = `${gq.hypothesis}${gq.why_interesting ? " — " + gq.why_interesting : ""}`.trim();
+        await env.DB.prepare(
+          `INSERT INTO missions (id, slug, title, summary, question, criterion, domain, verification_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(mId, slug, gq.title, summary, gq.question, gq.criterion, gq.domain || "General", mode).run();
+        const stratId = uid("strat");
+        await env.DB.prepare(
+          `INSERT INTO strategies (id, mission_id, title, description, author_label, model_family) VALUES (?, ?, ?, ?, 'Good Question', 'Human')`
+        ).bind(stratId, mId, "Initial Hypothesis Test", `Synthesized from ${gq.topic}. ${gq.synthesis_summary}`).run();
+        await env.DB.prepare(
+          `INSERT INTO help_requests (id, mission_id, strategy_id, kind, title, question, criterion, why_useful, prefer_different_model, requested_by_model) VALUES (?, ?, ?, 'reframe', ?, ?, ?, ?, 0, 'Human')`
+        ).bind(uid("help"), mId, stratId, "Initial test: " + gq.title.slice(0, 70), gq.question, gq.criterion, gq.why_interesting || "Tests the synthesized follow-up hypothesis.").run();
+        await env.DB.prepare(`UPDATE good_questions SET launched_mission_id = ? WHERE id = ?`).bind(mId, gq.id).run();
+        await defer(indexIdea(env, mId));
+        const mission = await env.DB.prepare(`SELECT * FROM missions WHERE id = ?`).bind(mId).first();
+        return json({ mission, already_launched: false }, 201);
       }
 
       // --- Idea Proximity (related / duplicate detection across all missions) ---
@@ -1340,6 +1435,11 @@ export default {
           return await submitHandoffForAgent(decodeURIComponent(handoffMatch[1]), body.handoff || body);
         }
 
+        if (method === "POST" && path === "/api/agent/v1/good-questions/synthesize") {
+          const body = await request.json().catch(() => ({}));
+          return json(await synthesizeGoodQuestions(env, body));
+        }
+
         if (method === "POST" && path === "/v1/agent") {
           const body = await request.json();
           const action = body.action;
@@ -1352,6 +1452,9 @@ export default {
           }
           if (action === "open_assignment") {
             return await openRunForAgent(body.run_id);
+          }
+          if (action === "synthesize_questions") {
+            return json(await synthesizeGoodQuestions(env, body));
           }
           if (action === "request_help") {
             const id = uid("help");
