@@ -592,6 +592,56 @@ function applyLang() {
   });
 }
 window.addEventListener('DOMContentLoaded', applyLang);
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderRelatedCards(items, heading, engine) {
+  if (!items || !items.length) return '';
+  const engineLabel = engine && engine.indexOf('semantic') !== -1 ? 'Semantic + Keyword' : 'Keyword Proximity';
+  return '<div class="card muted-card" style="margin:12px 0;">' +
+    '<div class="row" style="justify-content:space-between; margin-bottom:8px;">' +
+      '<strong>' + escHtml(heading || 'Related Existing Ideas') + '</strong>' +
+      '<span class="badge">' + escHtml(engineLabel) + '</span>' +
+    '</div>' +
+    items.map(function(r) {
+      const matchLabel = r.match === 'semantic+keyword' ? 'Semantic + Keyword' : (r.match === 'semantic' ? 'Semantic' : 'Keyword');
+      return '<div style="padding:8px 0; border-top:1px solid var(--border); font-size:13.5px;">' +
+        '<div class="row" style="justify-content:space-between;">' +
+          '<div><span class="badge primary">' + escHtml(r.score_pct) + '% · ' + escHtml(matchLabel) + '</span> ' +
+          '<span class="badge">' + escHtml(r.item_type) + '</span> ' +
+          '<a href="' + escHtml(r.url) + '" target="_blank" style="font-weight:700;">' + escHtml(r.title) + '</a></div>' +
+          '<span class="muted" style="font-size:12px;">' + escHtml(r.mission_title || '') + '</span>' +
+        '</div>' +
+        (r.snippet ? '<div class="muted" style="margin-top:4px;" dir="auto">' + escHtml(r.snippet) + '</div>' : '') +
+        (r.remaining_gap ? '<div class="muted" style="margin-top:3px; font-size:12px;"><strong>Gap:</strong> ' + escHtml(r.remaining_gap) + '</div>' : '') +
+        (r.why ? '<div class="muted" style="margin-top:2px; font-size:12px;">' + escHtml(r.why) + '</div>' : '') +
+      '</div>';
+    }).join('') +
+  '</div>';
+}
+
+const _relatedTimers = {};
+function checkRelated(boxId, text, opts) {
+  const el = document.getElementById(boxId);
+  if (!el) return;
+  const q = String(text || '').trim();
+  clearTimeout(_relatedTimers[boxId]);
+  if (q.length < 12) { el.innerHTML = ''; return; }
+  _relatedTimers[boxId] = setTimeout(async function() {
+    try {
+      const res = await fetch('/api/related', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ q: q, limit: 4 }, opts || {}))
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      el.innerHTML = renderRelatedCards(data.related_ideas, (opts && opts.heading) || 'Possible Related / Existing Work', data.engine);
+    } catch (e) {}
+  }, 350);
+}
 `;
 
 function layout(title, bodyHtml) {
@@ -675,11 +725,12 @@ export function renderHomePage() {
     <div id="ask-panel" class="card hidden">
       <h2>Post a New Open Question</h2>
       <p class="muted">Anyone can propose an open question for contributors and AI models to explore.</p>
-      <label>Title <input id="m-title" placeholder="e.g., Optimal shade-tree spacing in Mediterranean street canyons"></label>
+      <label>Title <input id="m-title" oninput="scheduleAskRelated()" placeholder="e.g., Optimal shade-tree spacing in Mediterranean street canyons"></label>
       <label>Domain <input id="m-domain" placeholder="e.g., Combinatorics, Physics, Urban Science" value="General"></label>
       <label>Summary <textarea id="m-summary" placeholder="Why does this question matter?"></textarea></label>
-      <label>Precise Question <textarea id="m-question" placeholder="What exact question should contributors answer?"></textarea></label>
+      <label>Precise Question <textarea id="m-question" oninput="scheduleAskRelated()" placeholder="What exact question should contributors answer?"></textarea></label>
       <label>Completion Criterion <textarea id="m-criterion" placeholder="What counts as a verified answer?"></textarea></label>
+      <div id="ask-related"></div>
       <button onclick="createMission()">Publish Question</button>
       <div id="ask-msg"></div>
     </div>
@@ -777,6 +828,12 @@ export function renderHomePage() {
         window.location.href = '/m/' + encodeURIComponent(data.mission.slug);
       }
 
+      function scheduleAskRelated() {
+        const t = (document.getElementById('m-title')?.value || '').trim();
+        const q = (document.getElementById('m-question')?.value || '').trim();
+        checkRelated('ask-related', (t + ' ' + q).trim(), { heading: 'Similar Existing Questions & Prior Work' });
+      }
+
       function esc(s) {
         return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
       }
@@ -836,7 +893,7 @@ export function renderMissionPage(slug) {
       }
 
       function render() {
-        const { mission, strategies, claims, help_requests, reviews = [] } = state;
+        const { mission, strategies, claims, help_requests, reviews = [], related_ideas = [], related_engine = 'keyword' } = state;
         const activeHelp = help_requests.filter(h => h.status === 'open');
         const doneHelp = help_requests.filter(h => h.status !== 'open');
         const shownHelp = helpTab === 'done' ? doneHelp : activeHelp;
@@ -872,8 +929,9 @@ export function renderMissionPage(slug) {
 
           <div id="new-strat-box" class="card hidden">
             <h3>Propose a New Strategy / Reframing</h3>
-            <label>Strategy Title <input id="s-title" placeholder="e.g., Reframe via Singular Harmonic Maps"></label>
-            <label>Approach Description <textarea id="s-desc" placeholder="Why might this angle crack the problem?"></textarea></label>
+            <label>Strategy Title <input id="s-title" oninput="scheduleMissionRelated('strat')" placeholder="e.g., Reframe via Singular Harmonic Maps"></label>
+            <label>Approach Description <textarea id="s-desc" oninput="scheduleMissionRelated('strat')" placeholder="Why might this angle crack the problem?"></textarea></label>
+            <div id="strat-related"></div>
             <button onclick="submitStrategy()">Add Strategy</button>
             <div id="s-msg"></div>
           </div>
@@ -894,10 +952,11 @@ export function renderMissionPage(slug) {
                 \${strategies.map(s => '<option value="' + esc(s.id) + '">' + esc(s.title) + '</option>').join('')}
               </select>
             </label>
-            <label>Title <input id="h-title" placeholder="Short description of what help is needed"></label>
-            <label>Exact Question <textarea id="h-question" placeholder="Exact bottleneck or verification question"></textarea></label>
+            <label>Title <input id="h-title" oninput="scheduleMissionRelated('help')" placeholder="Short description of what help is needed"></label>
+            <label>Exact Question <textarea id="h-question" oninput="scheduleMissionRelated('help')" placeholder="Exact bottleneck or verification question"></textarea></label>
             <label>What a Useful Answer Looks Like (Criterion) <input id="h-criterion" placeholder="What counts as a helpful answer?"></label>
             <label>How This Advances the Mission (Why Useful) <input id="h-why" placeholder="Explain how answering this advances a particular argument or decision"></label>
+            <div id="help-related"></div>
             <button onclick="submitHelpRequest()">Post Help Request</button>
             <div id="h-msg"></div>
           </div>
@@ -988,7 +1047,24 @@ export function renderMissionPage(slug) {
               </div>
             </div>
           \`;}).join('') || '<div class="card muted-card"><p class="muted" style="margin:0;">No findings posted yet — be the first to contribute!</p></div>'}
+
+          <h2>Related Ideas Across Missions (\${related_ideas.length})</h2>
+          \${related_ideas.length
+            ? renderRelatedCards(related_ideas, 'Similar strategies, claims, and prior attempts in other missions', related_engine)
+            : '<div class="card muted-card"><p class="muted" style="margin:0;">No closely related ideas detected in other missions yet.</p></div>'}
         \`;
+      }
+
+      function scheduleMissionRelated(kind) {
+        if (kind === 'strat') {
+          const t = (document.getElementById('s-title')?.value || '').trim();
+          const d = (document.getElementById('s-desc')?.value || '').trim();
+          checkRelated('strat-related', (t + ' ' + d).trim(), { context_mission_id: state?.mission?.id, heading: 'Related Strategies & Prior Attempts' });
+        } else {
+          const t = (document.getElementById('h-title')?.value || '').trim();
+          const q = (document.getElementById('h-question')?.value || '').trim();
+          checkRelated('help-related', (t + ' ' + q).trim(), { context_mission_id: state?.mission?.id, heading: 'Related Questions & Prior Attempts' });
+        }
       }
 
       function toggleBox(id) {
@@ -1200,6 +1276,7 @@ export function renderInvitePage() {
         </div>
 
         <div id="a-evidence"></div>
+        <div id="a-related"></div>
 
         <div class="row" style="margin:16px 0; padding:12px; background:var(--primary-soft); border-radius:12px; border:1px solid var(--primary-border);">
           <button type="button" onclick="openInChatGPT()">Open in ChatGPT</button>
@@ -1375,6 +1452,12 @@ export function renderInvitePage() {
         } else {
           evEl.innerHTML = '';
         }
+        const relEl = document.getElementById('a-related');
+        if (relEl) {
+          relEl.innerHTML = (a.related_ideas && a.related_ideas.length)
+            ? renderRelatedCards(a.related_ideas, 'Related Ideas From Other Missions', a.related_engine)
+            : '';
+        }
         const draftKey = 'pc_draft_' + a.id;
         document.getElementById('a-input').value = localStorage.getItem(draftKey) || '';
         document.getElementById('a-input').oninput = (e) => localStorage.setItem(draftKey, e.target.value);
@@ -1388,6 +1471,10 @@ export function renderInvitePage() {
         const evidenceLines = claims.map(c =>
           '- [' + c.verification_status + '] ' + c.id + ' (' + location.origin + (c.api_url || '') + '): ' + c.finding.slice(0, 220) + (c.remaining_gap ? ' | Gap: ' + c.remaining_gap.slice(0, 120) : '')
         ).join('\\n');
+        const related = a.related_ideas || [];
+        const relatedLines = related.map(r =>
+          '- [' + r.score_pct + '% ' + r.item_type + '] ' + r.title + ' (' + location.origin + (r.url || '') + '): ' + (r.snippet || '').slice(0, 160) + (r.remaining_gap ? ' | Gap: ' + r.remaining_gap.slice(0, 100) : '')
+        ).join('\\n');
 
         const parts = [
           'Work one Proof Commons research assignment (run_id: ' + a.id + ').',
@@ -1396,6 +1483,9 @@ export function renderInvitePage() {
           'Mission Completion Criterion: ' + (m.criterion || a.criterion),
           claims.length ? 'Strongest Relevant Findings & Exact Evidence Versions:\\n' + evidenceLines : 'Strongest Relevant Findings: None submitted yet.',
         ];
+        if (related.length) {
+          parts.push('Related Ideas From Other Missions (check before duplicating work):\\n' + relatedLines);
+        }
         if (a.scope !== 'full_mission') {
           parts.push(
             'Suggested Subproblem (' + a.kind + '): ' + a.title +

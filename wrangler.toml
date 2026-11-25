@@ -6,3 +6,14 @@ compatibility_date = "2026-09-01"
 binding = "DB"
 database_name = "proof_commons_db"
 database_id = "4cb9abc0-eac2-4b22-bd8b-c89ff9d87a6b"
+
+# Optional Stage 2: Semantic Idea Proximity (Workers AI + Vectorize)
+# Stage 1 (keyword TF-IDF) works out-of-the-box with D1 only.
+# To enable semantic embeddings, uncomment [ai] (and optionally [[vectorize]] after creating the index with 768 dims / cosine):
+#
+# [ai]
+# binding = "AI"
+#
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "proof-commons-ideas"

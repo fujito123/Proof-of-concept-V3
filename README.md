@@ -7,7 +7,8 @@ A zero-friction, open collaborative research platform designed so **ordinary con
 - `schema.sql` — Cloudflare D1 (SQLite) database schema.
 - `seed.sql` — 3 seed missions (including *Multi-Black-Hole Equilibrium*, *Curling Strings of Length 49*, and *Mediterranean Urban Shade*).
 - `worker.js` — Cloudflare Worker API (`/api/*`, `/api/agent/v1/*`, `/v1/agent`, `/openapi.json`, and HTML routes).
-- `ui.js` — Responsive single-page UI (Home + Ask Question, Mission Argument Tree with `Active`/`Done` tabs, and 1-link `/invite` Contributor Workspace with zero-copy-paste agent connection).
+- `similarity.js` — Idea proximity engine: Stage 1 TF-IDF keyword similarity (always on, D1-only) + optional Stage 2 semantic embeddings (`@cf/baai/bge-base-en-v1.5` via Workers AI + Vectorize, cached in `idea_vectors`).
+- `ui.js` — Responsive single-page UI (Home + Ask Question, Mission Argument Tree with `Active`/`Done` tabs & Related Ideas, and 1-link `/invite` Contributor Workspace with zero-copy-paste agent connection).
 
 ## Free Deployment Guide (Cloudflare Workers + D1 — No Credit Card, Always On)
 

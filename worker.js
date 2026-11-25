@@ -1,4 +1,5 @@
 import { renderHomePage, renderMissionPage, renderInvitePage } from "./ui.js";
+import { findRelatedIdeas, safeRelatedIdeas, indexIdea, semanticAvailable } from "./similarity.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -123,7 +124,7 @@ async function runAutoVerifier(env, { missionId, claimId, finding, how_to_check 
   return null;
 }
 
-async function getMissionBriefContext(env, missionId) {
+async function getMissionBriefContext(env, missionId, opts = {}) {
   const mission = await env.DB.prepare(
     `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary FROM missions WHERE id = ?`
   ).bind(missionId).first();
@@ -143,7 +144,61 @@ async function getMissionBriefContext(env, missionId) {
     url: `/m/${encodeURIComponent(slug)}#claim-${c.id}`,
     api_url: `/api/claims/${encodeURIComponent(c.id)}`,
   }));
-  return { mission, prior_claims };
+  let related_ideas = [];
+  let related_engine = "keyword";
+  if (mission) {
+    const focus = opts.helpRequest
+      ? `${opts.helpRequest.title}\n${opts.helpRequest.question}\n${opts.helpRequest.why_useful || ""}\n${mission.question}`
+      : "";
+    const rel = await safeRelatedIdeas(env, {
+      text: focus,
+      itemId: focus ? null : mission.id,
+      excludeMissionId: mission.id,
+      contextMissionId: mission.id,
+      limit: 5,
+    });
+    related_ideas = rel.items;
+    related_engine = rel.engine;
+  }
+  return { mission, prior_claims, related_ideas, related_engine };
+}
+
+const RELATED_TYPES = ["mission", "strategy", "claim", "help_request"];
+
+async function relatedRequest(env, src = {}) {
+  const resolveMission = async (v) => {
+    if (!v) return null;
+    const m = await env.DB.prepare(`SELECT id FROM missions WHERE id = ? OR slug = ?`).bind(String(v), String(v)).first();
+    return m?.id || String(v);
+  };
+  const types = String(Array.isArray(src.types) ? src.types.join(",") : src.types || "")
+    .split(",").map(s => s.trim()).filter(t => RELATED_TYPES.includes(t));
+  const missionId = await resolveMission(src.mission_id);
+  const excludeMissionId = await resolveMission(src.exclude_mission_id);
+  const contextMissionId = (await resolveMission(src.context_mission_id)) || missionId || excludeMissionId;
+  const text = String(src.q || src.text || "").slice(0, 4000);
+  const itemId = src.item_id ? String(src.item_id) : null;
+  if (!text.trim() && !itemId) return { status: 400, data: { error: "Provide q (text) or item_id." } };
+  const rel = await findRelatedIdeas(env, {
+    text,
+    itemId,
+    missionId,
+    excludeMissionId,
+    contextMissionId,
+    excludeIds: String(src.exclude_ids || "").split(",").map(s => s.trim()).filter(Boolean),
+    types,
+    limit: src.limit,
+  });
+  return {
+    status: 200,
+    data: {
+      query: { q: text.slice(0, 200), item_id: itemId, mission_id: missionId, exclude_mission_id: excludeMissionId, types },
+      semantic_enabled: semanticAvailable(env),
+      vectorize_bound: Boolean(env.VECTORIZE),
+      ...rel,
+      related_ideas: rel.items,
+    },
+  };
 }
 
 const migratedDbs = new WeakSet();
@@ -160,6 +215,20 @@ async function ensureSchemaAndSeed(env) {
   for (const sql of alterStatements) {
     try { await env.DB.prepare(sql).run(); } catch (_) { /* column already exists */ }
   }
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS idea_vectors (
+        item_id TEXT PRIMARY KEY,
+        item_type TEXT NOT NULL,
+        mission_id TEXT,
+        model TEXT NOT NULL,
+        text_hash TEXT NOT NULL,
+        dims INTEGER NOT NULL DEFAULT 0,
+        embedding_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `).run();
+  } catch (_) { /* best effort */ }
   try {
     await env.DB.prepare(`
       INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status) VALUES (
@@ -204,10 +273,17 @@ async function ensureSchemaAndSeed(env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method.toUpperCase();
+    // Run background work (e.g. embedding indexing) without delaying the response on Cloudflare;
+    // await it inline when no execution context exists (local tests).
+    const defer = async (promise) => {
+      const safe = Promise.resolve(promise).catch(() => {});
+      if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(safe);
+      else await safe;
+    };
 
     if (method === "OPTIONS") {
       return new Response(null, {
@@ -345,15 +421,39 @@ export default {
                 responses: { "200": { description: "Submission receipt with claim_id and receipt_url" } },
               },
             },
+            "/api/agent/v1/related": {
+              get: {
+                operationId: "findRelatedIdeas",
+                summary: "Find related missions, strategies, claims (including partial or stalled attempts), and help requests across all missions before starting or duplicating work",
+                parameters: [
+                  { name: "q", in: "query", required: false, schema: { type: "string" }, description: "Free-text idea, question, or proof step to compare" },
+                  { name: "item_id", in: "query", required: false, schema: { type: "string" }, description: "Compare against an existing mission/strategy/claim/help_request ID instead of q" },
+                  { name: "mission_id", in: "query", required: false, schema: { type: "string" }, description: "Restrict results to one mission" },
+                  { name: "exclude_mission_id", in: "query", required: false, schema: { type: "string" }, description: "Exclude one mission (for cross-mission links)" },
+                  { name: "types", in: "query", required: false, schema: { type: "string" }, description: "Comma-separated subset of mission,strategy,claim,help_request" },
+                  { name: "limit", in: "query", required: false, schema: { type: "integer", default: 6 } },
+                ],
+                responses: { "200": { description: "Ranked related ideas with similarity score, match type (keyword / semantic), shared terms, and stable links" } },
+              },
+            },
             "/v1/agent": {
               post: {
                 operationId: "agentRpc",
-                summary: "Unified single-endpoint agent action (list_missions, draw_task, open_assignment, submit_handoff, request_help).",
+                summary: "Unified single-endpoint agent action (list_missions, draw_task, open_assignment, submit_handoff, request_help, find_related).",
                 responses: { "200": { description: "Action result" } },
               },
             },
           },
         });
+      }
+
+      // --- Idea Proximity (related / duplicate detection across all missions) ---
+      if (path === "/api/related" && (method === "GET" || method === "POST")) {
+        const src = method === "POST"
+          ? await request.json().catch(() => ({}))
+          : Object.fromEntries(url.searchParams.entries());
+        const result = await relatedRequest(env, src);
+        return json(result.data, result.status);
       }
 
       // --- Missions API ---
@@ -397,7 +497,9 @@ export default {
           .bind(uid("help"), id, stratId, "Initial analysis: " + title, question, criterion)
           .run();
         const mission = await env.DB.prepare(`SELECT * FROM missions WHERE id = ?`).bind(id).first();
-        return json({ mission }, 201);
+        // findRelated backfills/caches the new mission's embedding when Workers AI is bound
+        const similar = await safeRelatedIdeas(env, { itemId: id, excludeMissionId: id, limit: 5 });
+        return json({ mission, similar_existing: similar.items, related_engine: similar.engine }, 201);
       }
 
       if (method === "GET" && path.startsWith("/api/missions/")) {
@@ -416,7 +518,12 @@ export default {
         const { results: reviews } = await env.DB.prepare(
           `SELECT r.* FROM reviews r JOIN claims c ON c.id = r.claim_id WHERE c.mission_id = ? ORDER BY r.created_at DESC`
         ).bind(mission.id).all();
-        return json({ mission, strategies, claims, help_requests, reviews });
+        const related = await safeRelatedIdeas(env, { itemId: mission.id, excludeMissionId: mission.id, contextMissionId: mission.id, limit: 6 });
+        return json({
+          mission, strategies, claims, help_requests, reviews,
+          related_ideas: related.items,
+          related_engine: related.engine,
+        });
       }
 
       if (method === "GET" && path.startsWith("/api/claims/")) {
@@ -440,7 +547,9 @@ export default {
         )
           .bind(id, body.mission_id, body.title.trim(), body.description.trim(), body.author_label || "Contributor", body.model_family || "Human")
           .run();
-        return json({ strategy_id: id }, 201);
+        await defer(indexIdea(env, id));
+        const similar = await safeRelatedIdeas(env, { itemId: id, contextMissionId: body.mission_id, types: ["strategy", "claim", "help_request"], limit: 5 });
+        return json({ strategy_id: id, similar_existing: similar.items }, 201);
       }
 
       if (method === "POST" && path === "/api/help-requests") {
@@ -469,7 +578,9 @@ export default {
             body.requested_by_session || "web"
           )
           .run();
-        return json({ help_request_id: id }, 201);
+        await defer(indexIdea(env, id));
+        const similar = await safeRelatedIdeas(env, { itemId: id, contextMissionId: body.mission_id, types: ["strategy", "claim", "help_request"], limit: 5 });
+        return json({ help_request_id: id, similar_existing: similar.items }, 201);
       }
 
       if (method === "POST" && path === "/api/reviews") {
@@ -536,6 +647,7 @@ export default {
             )
             .run();
         }
+        if (follow_up_help_id) await defer(indexIdea(env, follow_up_help_id));
 
         return json({
           review_id: reviewId,
@@ -616,6 +728,8 @@ export default {
           .bind(assign.invite_token)
           .run();
 
+        await defer(indexIdea(env, claimId));
+
         const auto_verified = await runAutoVerifier(env, {
           missionId: assign.mission_id,
           claimId,
@@ -680,6 +794,14 @@ export default {
             .run();
         }
 
+        if (follow_up_help_id) await defer(indexIdea(env, follow_up_help_id));
+        const related = await safeRelatedIdeas(env, {
+          itemId: claimId,
+          contextMissionId: assign.mission_id,
+          types: ["strategy", "claim", "help_request"],
+          limit: 3,
+        });
+
         return {
           status: 200,
           data: {
@@ -692,6 +814,7 @@ export default {
             follow_up_help_id,
             auto_verified,
             receipt_url: claimUrl,
+            related_ideas: related.items,
           },
         };
       }
@@ -723,7 +846,7 @@ export default {
             LIMIT 1
           `).bind(invite.token, agentSession).first();
           if (openAssign) {
-            const { mission, prior_claims } = await getMissionBriefContext(env, openAssign.mission_id);
+            const { mission, prior_claims, related_ideas } = await getMissionBriefContext(env, openAssign.mission_id, { helpRequest: openAssign.help_request_id ? openAssign : null });
             active_assignment = {
               id: openAssign.id,
               mission_id: openAssign.mission_id,
@@ -738,6 +861,7 @@ export default {
               target_claim_id: openAssign.target_claim_id || null,
               disputed_step: openAssign.disputed_step || "",
               prior_claims,
+              related_ideas,
               resumed: true,
             };
           }
@@ -788,7 +912,7 @@ export default {
               `).bind(invite.token, agentSession, missionId).first();
 
         if (existingAssign) {
-          const { mission, prior_claims } = await getMissionBriefContext(env, existingAssign.mission_id);
+          const { mission, prior_claims, related_ideas } = await getMissionBriefContext(env, existingAssign.mission_id, { helpRequest: existingAssign.help_request_id ? existingAssign : null });
           return json({
             assignment: {
               id: existingAssign.id,
@@ -804,6 +928,7 @@ export default {
               target_claim_id: existingAssign.target_claim_id || null,
               disputed_step: existingAssign.disputed_step || "",
               prior_claims,
+              related_ideas,
               resumed: true,
             },
           });
@@ -831,7 +956,7 @@ export default {
           return json({ error: "Please select a mission first." }, 400);
         }
 
-        const { mission, prior_claims } = await getMissionBriefContext(env, resolvedMissionId);
+        const { mission, prior_claims, related_ideas } = await getMissionBriefContext(env, resolvedMissionId, { helpRequest: helpReq });
         if (!mission) return json({ error: "Mission not found." }, 404);
 
         const assignId = uid("assign");
@@ -855,6 +980,7 @@ export default {
             target_claim_id: helpReq?.target_claim_id || null,
             disputed_step: helpReq?.disputed_step || "",
             prior_claims,
+            related_ideas,
           },
         });
       }
@@ -950,7 +1076,7 @@ export default {
           }
           if (!resolvedMissionId) return json({ error: "No active missions available." }, 404);
 
-          const { mission, prior_claims } = await getMissionBriefContext(env, resolvedMissionId);
+          const { mission, prior_claims, related_ideas } = await getMissionBriefContext(env, resolvedMissionId, { helpRequest: helpReq });
           const assignId = uid("assign");
           await env.DB.prepare(
             `INSERT INTO assignments (id, invite_token, mission_id, help_request_id, model_family, agent_session) VALUES (?, ?, ?, ?, ?, ?)`
@@ -963,7 +1089,8 @@ export default {
             mission,
             help_request: helpReq,
             prior_claims,
-            guidance: "You are free to investigate the full mission, propose an alternative route, or submit a direct candidate solution (set addresses_full_mission: true). Any suggested help_request provides context, not a restriction.",
+            related_ideas,
+            guidance: "You are free to investigate the full mission, propose an alternative route, or submit a direct candidate solution (set addresses_full_mission: true). Any suggested help_request provides context, not a restriction. related_ideas lists similar strategies, claims, and stalled attempts from other missions — open their url/api_url before duplicating work.",
           });
         };
 
@@ -973,7 +1100,7 @@ export default {
           const helpReq = assign.help_request_id
             ? await env.DB.prepare(`SELECT * FROM help_requests WHERE id = ?`).bind(assign.help_request_id).first()
             : null;
-          const { mission, prior_claims: evidence } = await getMissionBriefContext(env, assign.mission_id);
+          const { mission, prior_claims: evidence, related_ideas } = await getMissionBriefContext(env, assign.mission_id, { helpRequest: helpReq });
           return json({
             run_id: assign.id,
             status: assign.status,
@@ -981,7 +1108,8 @@ export default {
             mission,
             help_request: helpReq,
             evidence,
-            guidance: "You may answer the help_request, propose a different route, or submit a candidate solution to the full mission (addresses_full_mission: true).",
+            related_ideas,
+            guidance: "You may answer the help_request, propose a different route, or submit a candidate solution to the full mission (addresses_full_mission: true). related_ideas lists similar prior work from other missions.",
           });
         };
 
@@ -994,6 +1122,13 @@ export default {
 
         if (method === "GET" && path === "/api/agent/v1/missions") {
           return json(await listMissionsForAgent());
+        }
+        if ((method === "GET" || method === "POST") && path === "/api/agent/v1/related") {
+          const src = method === "POST"
+            ? await request.json().catch(() => ({}))
+            : Object.fromEntries(url.searchParams.entries());
+          const result = await relatedRequest(env, src);
+          return json(result.data, result.status);
         }
         const claimMatch = path.match(/^\/api\/agent\/v1\/claims\/([^/]+)$/);
         if (method === "GET" && claimMatch) {
@@ -1056,7 +1191,18 @@ export default {
                 body.agent_session || token
               )
               .run();
-            return json({ help_request_id: id }, 201);
+            await defer(indexIdea(env, id));
+            const similar = await safeRelatedIdeas(env, {
+              itemId: id,
+              contextMissionId: body.mission_id || invite.mission_id,
+              types: ["strategy", "claim", "help_request"],
+              limit: 5,
+            });
+            return json({ help_request_id: id, similar_existing: similar.items }, 201);
+          }
+          if (action === "find_related") {
+            const result = await relatedRequest(env, body);
+            return json(result.data, result.status);
           }
           if (action === "submit_handoff" || action === "answer_help") {
             return await submitHandoffForAgent(body.run_id, body.handoff || body);

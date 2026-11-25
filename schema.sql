@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS assignments (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Idea proximity: cached semantic embeddings (optional Stage 2; Stage 1 keyword similarity needs no storage)
+CREATE TABLE IF NOT EXISTS idea_vectors (
+  item_id TEXT PRIMARY KEY,           -- mission / strategy / claim / help_request id
+  item_type TEXT NOT NULL,
+  mission_id TEXT,
+  model TEXT NOT NULL,
+  text_hash TEXT NOT NULL,            -- re-embed only when the source text changes
+  dims INTEGER NOT NULL DEFAULT 0,
+  embedding_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_claims_mission ON claims(mission_id, verification_status);
 CREATE INDEX IF NOT EXISTS idx_help_mission ON help_requests(mission_id, status);
 CREATE INDEX IF NOT EXISTS idx_assignments_invite ON assignments(invite_token, status);

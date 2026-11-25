@@ -231,4 +231,196 @@ assert.equal(scopedDraw.status, 200);
 assert.equal(scopedDraw.json.mission.id, 'mission-hadwiger-nelson-5');
 assert.equal(scopedDraw.json.scope, 'full_mission');
 
-console.log('ALL_7_SCENARIOS_PASSED');
+// Scenario 8: Stage 1 idea proximity (keyword TF-IDF, no extra bindings) across web + agent entry points
+const relGet = await call('/api/related?q=' + encodeURIComponent('chromatic number of unit distance graph coloring with a SAT solver'));
+assert.equal(relGet.status, 200);
+assert.equal(relGet.json.engine, 'keyword');
+assert.equal(relGet.json.semantic_enabled, false);
+assert.ok(relGet.json.related_ideas.length > 0);
+assert.equal(relGet.json.related_ideas[0].mission_id, 'mission-hadwiger-nelson-5');
+assert.ok(relGet.json.related_ideas[0].url.startsWith('/m/hadwiger-nelson-5-chromatic-minimization'));
+assert.ok(relGet.json.related_ideas.every(i => i.match === 'keyword' && i.score > 0));
+
+const relEmpty = await call('/api/related');
+assert.equal(relEmpty.status, 400);
+
+// Posting a near-duplicate question surfaces the existing mission before contributors duplicate work
+const dupMission = await call('/api/missions', {
+  method: 'POST',
+  body: {
+    title: 'Smallest 6-chromatic unit-distance graph in the plane',
+    domain: 'Discrete Geometry',
+    question: 'What is the minimum vertex count of a unit-distance graph in R^2 whose chromatic number is at least 6, if one exists?',
+    criterion: 'Explicit unit-distance coordinates plus a SAT certificate that the graph is not 5-colorable.',
+  },
+});
+assert.equal(dupMission.status, 201);
+assert.ok(dupMission.json.similar_existing.some(i => i.mission_id === 'mission-hadwiger-nelson-5'));
+
+// Mission page JSON shows cross-mission related ideas (never items from the mission itself)
+const dupPage = await call('/api/missions/' + dupMission.json.mission.slug);
+assert.equal(dupPage.status, 200);
+assert.ok(dupPage.json.related_ideas.length > 0);
+assert.ok(dupPage.json.related_ideas.every(i => i.mission_id !== dupMission.json.mission.id));
+assert.ok(dupPage.json.related_ideas.some(i => i.mission_id === 'mission-hadwiger-nelson-5'));
+
+// Agent draw + open carry related_ideas so a fresh agent sees prior attempts in other missions
+const relDraw = await call('/api/agent/v1/draw', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { mission_id: dupMission.json.mission.id, scope: 'full_mission', model_family: 'GPT', agent_session: 'rel_sess' },
+});
+assert.equal(relDraw.status, 200);
+assert.ok(relDraw.json.related_ideas.some(i => i.mission_id === 'mission-hadwiger-nelson-5'));
+assert.ok(relDraw.json.guidance.includes('related_ideas'));
+const relOpen = await call(`/api/agent/v1/runs/${relDraw.json.run_id}/open`, { method: 'POST', token: 'poc_open_invite_demo' });
+assert.ok(Array.isArray(relOpen.json.related_ideas));
+
+// Web invite draw also includes related_ideas
+const relInviteDraw = await call('/api/invite/draw', {
+  method: 'POST',
+  body: { token: 'poc_open_invite_demo', mission_id: dupMission.json.mission.id, scope: 'full_mission', agent_session: 'rel_web_sess' },
+});
+assert.equal(relInviteDraw.status, 200);
+assert.ok(relInviteDraw.json.assignment.related_ideas.some(i => i.mission_id === 'mission-hadwiger-nelson-5'));
+
+// Agent REST + RPC lookups (authenticated)
+const relAgentGet = await call('/api/agent/v1/related?q=' + encodeURIComponent('subextremal horizons conical strut Ernst potential'), { token: 'poc_open_invite_demo' });
+assert.equal(relAgentGet.status, 200);
+assert.equal(relAgentGet.json.related_ideas[0].mission_id, 'mission-bh-balance');
+const relRpc = await call('/v1/agent', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { action: 'find_related', q: 'axis-pole asymptotics logarithmic term', types: 'claim,help_request' },
+});
+assert.equal(relRpc.status, 200);
+assert.ok(relRpc.json.related_ideas.length > 0);
+assert.ok(relRpc.json.related_ideas.every(i => ['claim', 'help_request'].includes(i.item_type)));
+// The stalled BH candidate (needs_work review) stays discoverable as a prior attempt
+assert.ok(relRpc.json.related_ideas.some(i => i.item_id === bhHandoff.json.claim_id && i.prior_attempt === true));
+
+// Receipts and new help requests report similar existing work
+const relReq = await call('/api/help-requests', {
+  method: 'POST',
+  body: {
+    mission_id: dupMission.json.mission.id,
+    title: 'Monochromatic forcing gadget for 5-colorings',
+    question: 'Build a small unit-distance gadget forcing two vertices at distance sqrt(3) to share a color in every 5-coloring.',
+    criterion: 'Coordinates plus SAT check.',
+    why_useful: 'Lets the 6-chromatic construction reuse Hadwiger-Nelson gadgets.',
+  },
+});
+assert.equal(relReq.status, 201);
+assert.ok(relReq.json.similar_existing.some(i => i.item_id === 'help-hn-gadget'));
+assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM idea_vectors`).get().n, 0, 'No embeddings are stored without Workers AI');
+
+// Scenario 9: Stage 2 semantic proximity with mock Workers AI + Vectorize, plus graceful fallback
+const CONCEPTS = [
+  ['black', 'hole', 'horizon', 'einstein', 'gravity', 'gravitational', 'spacetime', 'collapse', 'relativity', 'ernst', 'kerr'],
+  ['graph', 'chromatic', 'coloring', 'colorable', 'colour', 'vertex', 'vertices', 'unit', 'distance', 'sat'],
+  ['tree', 'shade', 'canopy', 'urban', 'street', 'cooling', 'heat', 'airflow'],
+  ['curling', 'string', 'binary', 'sequence', 'witness'],
+];
+const DIMS = 64;
+const aiCalls = { n: 0, texts: 0 };
+const mockAI = {
+  async run(model, { text }) {
+    assert.equal(model, '@cf/baai/bge-base-en-v1.5');
+    aiCalls.n++; aiCalls.texts += text.length;
+    return {
+      shape: [text.length, DIMS],
+      data: text.map(t => {
+        const v = new Array(DIMS).fill(0);
+        for (const w of t.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)) {
+          const g = CONCEPTS.findIndex(c => c.includes(w));
+          if (g >= 0) v[g] += 1;
+          else { let h = 0; for (const ch of w) h = (h * 31 + ch.charCodeAt(0)) >>> 0; v[4 + (h % (DIMS - 4))] += 0.3; }
+        }
+        return v;
+      }),
+    };
+  },
+};
+const vecStore = new Map();
+const vecCalls = { upsert: 0, query: 0 };
+const mockVectorize = {
+  async upsert(items) { vecCalls.upsert++; for (const it of items) vecStore.set(it.id, it.values); return { count: items.length }; },
+  async query(vec, { topK }) {
+    vecCalls.query++;
+    const cos = (a, b) => { let d = 0, x = 0, y = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; x += a[i] * a[i]; y += b[i] * b[i]; } return x && y ? d / Math.sqrt(x * y) : 0; };
+    return { matches: [...vecStore].map(([id, v]) => ({ id, score: cos(vec, v) })).sort((a, b) => b.score - a.score).slice(0, topK) };
+  },
+};
+async function callEnv(env, path, { method = 'GET', body = null, token = null } = {}) {
+  const headers = new Headers();
+  if (body) headers.set('Content-Type', 'application/json');
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const res = await worker.fetch(new Request(`https://proof-commons.example${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined }), { DB: D1, ...env });
+  return { status: res.status, json: await res.json() };
+}
+
+// Semantic-only match: no shared keywords with the BH mission, but same concept
+const semQ = 'gravitational spacetime collapse';
+const semAI = await callEnv({ AI: mockAI }, '/api/related?q=' + encodeURIComponent(semQ));
+assert.equal(semAI.status, 200);
+assert.equal(semAI.json.engine, 'semantic+keyword');
+assert.equal(semAI.json.vectorize, false);
+assert.ok(semAI.json.related_ideas.length > 0);
+assert.equal(semAI.json.related_ideas[0].mission_id, 'mission-bh-balance');
+assert.equal(semAI.json.related_ideas[0].match, 'semantic');
+assert.equal(semAI.json.related_ideas[0].keyword_score, 0);
+const cachedRows = db.prepare(`SELECT COUNT(*) AS n FROM idea_vectors`).get().n;
+assert.ok(cachedRows > 0, 'Embeddings are cached in D1');
+const kwOnly = await call('/api/related?q=' + encodeURIComponent(semQ));
+assert.equal(kwOnly.json.related_ideas.length, 0, 'Keyword engine alone cannot see this match');
+
+// Cached embeddings are reused (no re-embedding of unchanged texts)
+const callsBefore = aiCalls.texts;
+let semAgain;
+for (let i = 0; i < 5; i++) semAgain = await callEnv({ AI: mockAI }, '/api/related?q=' + encodeURIComponent(semQ));
+assert.equal(semAgain.json.pending_embeddings, 0);
+const backfillDone = aiCalls.texts;
+await callEnv({ AI: mockAI }, '/api/related?q=' + encodeURIComponent(semQ));
+assert.equal(aiCalls.texts, backfillDone, 'Fully cached corpus + cached query needs no new AI calls');
+assert.ok(backfillDone >= callsBefore);
+
+// New claims are indexed on submission and Vectorize is used when bound
+const semDraw = await callEnv({ AI: mockAI, VECTORIZE: mockVectorize }, '/api/agent/v1/draw', {
+  method: 'POST', token: 'poc_open_invite_demo',
+  body: { mission_id: 'mission-hadwiger-nelson-5', scope: 'full_mission', model_family: 'Claude', agent_session: 'sem_sess' },
+});
+assert.equal(semDraw.status, 200);
+const semSubmit = await callEnv({ AI: mockAI, VECTORIZE: mockVectorize }, `/api/agent/v1/runs/${semDraw.json.run_id}/handoff`, {
+  method: 'POST', token: 'poc_open_invite_demo',
+  body: { outcome: 'partial', finding: 'Partial: a 610-vertex colorable lattice patch; pruning stalled near 540 vertices.', remaining_gap: 'Needs better vertex pruning heuristic.' },
+});
+assert.equal(semSubmit.status, 200);
+assert.ok(db.prepare(`SELECT item_id FROM idea_vectors WHERE item_id = ?`).get(semSubmit.json.claim_id), 'New claim embedded');
+assert.ok(vecCalls.upsert > 0);
+const semVec = await callEnv({ AI: mockAI, VECTORIZE: mockVectorize }, '/api/related?q=' + encodeURIComponent('vertex coloring of a graph'));
+assert.equal(semVec.json.vectorize, true);
+assert.ok(vecCalls.query > 0);
+assert.ok(semVec.json.related_ideas.some(i => i.mission_id === 'mission-hadwiger-nelson-5'));
+
+// Workers AI failure → silent fallback to keyword engine, still 200
+const brokenAI = { async run() { throw new Error('quota exceeded'); } };
+const fallback = await callEnv({ AI: brokenAI }, '/api/related?q=' + encodeURIComponent('chromatic unit distance graph'));
+assert.equal(fallback.status, 200);
+assert.equal(fallback.json.engine, 'keyword');
+assert.ok(fallback.json.semantic_error.includes('quota'));
+assert.ok(fallback.json.related_ideas.length > 0);
+const pageFallback = await callEnv({ AI: brokenAI }, '/api/missions/multi-black-hole-equilibrium');
+assert.equal(pageFallback.status, 200);
+
+// UI exposes the related-ideas surfaces
+const missionHtml = await call('/m/multi-black-hole-equilibrium');
+assert.ok(missionHtml.text.includes('Related Ideas Across Missions'));
+assert.ok(missionHtml.text.includes('checkRelated('));
+const homeHtml = await call('/');
+assert.ok(homeHtml.text.includes('checkRelated('));
+const inviteHtml = await call('/invite');
+assert.ok(inviteHtml.text.includes('Related Ideas From Other Missions'));
+const spec = await call('/openapi.json');
+assert.ok(spec.json.paths['/api/agent/v1/related']);
+
+console.log('ALL_9_SCENARIOS_PASSED');
