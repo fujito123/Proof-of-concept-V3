@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS missions (
   status TEXT NOT NULL DEFAULT 'active', -- 'active' | 'resolved'
   resolution_summary TEXT,
   formal_statement TEXT NOT NULL DEFAULT '',
+  verification_mode TEXT NOT NULL DEFAULT 'criterion_review', -- 'lean4' | 'computational' | 'criterion_review'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   notes TEXT NOT NULL DEFAULT '',
   lean_proof TEXT NOT NULL DEFAULT '',
   lean_check_output TEXT NOT NULL DEFAULT '',
+  verification_evidence TEXT NOT NULL DEFAULT '',
   semantic_aligned INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -727,16 +727,25 @@ export function renderHomePage() {
     <div id="missions-list" class="missions-grid"><p class="muted">Loading missions...</p></div>
 
     <div id="ask-panel" class="card hidden">
-      <h2>Post a New Open Question</h2>
-      <p class="muted">Anyone can propose an open question for contributors and AI models to explore.</p>
-      <label>Title <input id="m-title" oninput="scheduleAskRelated()" placeholder="e.g., Optimal shade-tree spacing in Mediterranean street canyons"></label>
-      <label>Domain <input id="m-domain" placeholder="e.g., Combinatorics, Physics, Urban Science" value="General"></label>
-      <label>Summary <textarea id="m-summary" placeholder="Why does this question matter?"></textarea></label>
-      <label>Precise Question <textarea id="m-question" oninput="scheduleAskRelated()" placeholder="What exact question should contributors answer?"></textarea></label>
-      <label>Completion Criterion <textarea id="m-criterion" placeholder="What counts as a verified answer?"></textarea></label>
-      <label>Formal Statement in Lean 4 (optional — locks the exact mathematical goal) <textarea id="m-formal" placeholder="theorem mission_goal ... : ... := by sorry"></textarea></label>
+      <h2>Post a New Mission / Open Question</h2>
+      <p class="muted">Propose any collaborative mission — mathematics, science, software, games, psychology, or general research.</p>
+      <label>Title <input id="m-title" oninput="scheduleAskRelated()" placeholder="e.g., Validated stress-resilience assessment, Co-op puzzle game, or Math conjecture"></label>
+      <label>Domain <input id="m-domain" placeholder="e.g., Math, Game Dev, Psychology, Physics, Urban Science" value="General"></label>
+      <label>Verification Gate (How final solutions are verified)
+        <select id="m-vmode" onchange="document.getElementById('m-formal-wrap').classList.toggle('hidden', this.value !== 'lean4')">
+          <option value="criterion_review">Criterion Peer Review (Psychology, Applied Science, Writing, General)</option>
+          <option value="computational">Reproducible Run / Playtest (Games, Code, Simulations, Benchmarks)</option>
+          <option value="lean4">Formal Proof in Lean 4 (Mathematics, Logic, Formal Verification)</option>
+        </select>
+      </label>
+      <label>Summary <textarea id="m-summary" placeholder="Why does this mission matter?"></textarea></label>
+      <label>Precise Goal / Question <textarea id="m-question" oninput="scheduleAskRelated()" placeholder="What exact goal or question should contributors solve or build?"></textarea></label>
+      <label>Completion Criterion <textarea id="m-criterion" placeholder="What counts as a verified deliverable or answer?"></textarea></label>
+      <div id="m-formal-wrap" class="hidden">
+        <label>Formal Statement in Lean 4 (optional — locks the exact mathematical goal) <textarea id="m-formal" placeholder="theorem mission_goal ... : ... := by sorry"></textarea></label>
+      </div>
       <div id="ask-related"></div>
-      <button onclick="createMission()">Publish Question</button>
+      <button onclick="createMission()">Publish Mission</button>
       <div id="ask-msg"></div>
     </div>
 
@@ -819,6 +828,7 @@ export function renderHomePage() {
           summary: document.getElementById('m-summary').value.trim(),
           question: document.getElementById('m-question').value.trim(),
           criterion: document.getElementById('m-criterion').value.trim(),
+          verification_mode: document.getElementById('m-vmode')?.value || 'criterion_review',
           formal_statement: (document.getElementById('m-formal')?.value || '').trim(),
         };
         const res = await fetch('/api/missions', {
@@ -900,6 +910,8 @@ export function renderMissionPage(slug) {
 
       function render() {
         const { mission, strategies, claims, help_requests, reviews = [], related_ideas = [], related_engine = 'keyword' } = state;
+        const vMode = mission.verification_mode || 'criterion_review';
+        const vModeLabel = vMode === 'lean4' ? 'Gate: Lean 4 Proof' : (vMode === 'computational' ? 'Gate: Code / Playtest' : 'Gate: Criterion Peer Review');
         const activeHelp = help_requests.filter(h => h.status === 'open');
         const doneHelp = help_requests.filter(h => h.status !== 'open');
         const shownHelp = helpTab === 'done' ? doneHelp : activeHelp;
@@ -907,7 +919,10 @@ export function renderMissionPage(slug) {
         document.getElementById('mission-root').innerHTML = \`
           <div class="card accent-card" style="padding:24px;">
             <div class="row" style="justify-content:space-between; margin-bottom:10px;">
-              <span class="badge primary">\${esc(mission.domain)}</span>
+              <div class="row">
+                <span class="badge primary">\${esc(mission.domain)}</span>
+                <span class="badge">\${esc(vModeLabel)}</span>
+              </div>
               <span class="badge \${mission.status === 'resolved' ? 'ok' : 'primary'}">\${esc(mission.status.toUpperCase())}</span>
             </div>
             <h1 style="margin-top:4px;" dir="auto">\${esc(mission.title)}</h1>
@@ -916,7 +931,7 @@ export function renderMissionPage(slug) {
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
               <div>
-                <span class="badge">Target Question</span>
+                <span class="badge">Target Goal / Question</span>
                 <p dir="auto" style="margin:8px 0 0; font-size:14.5px;">\${esc(mission.question)}</p>
               </div>
               <div>
@@ -932,7 +947,7 @@ export function renderMissionPage(slug) {
               <a class="btn secondary" href="/invite?mission_id=\${encodeURIComponent(mission.id)}#poc_open_invite_demo">Draw Suggested Task</a>
               <button class="secondary" onclick="toggleBox('new-strat-box')">+ Competing Strategy</button>
               <button class="secondary" onclick="toggleBox('new-help-box')">+ Ask Another Model for Help</button>
-              <button class="secondary" onclick="toggleBox('edit-formal-box')">\${mission.formal_statement ? 'Edit Lean Statement' : '+ Lock Lean 4 Statement'}</button>
+              \${vMode === 'lean4' ? '<button class="secondary" onclick="toggleBox(\\'edit-formal-box\\')">' + (mission.formal_statement ? 'Edit Lean Statement' : '+ Lock Lean 4 Statement') + '</button>' : ''}
             </div>
           </div>
 
@@ -944,9 +959,9 @@ export function renderMissionPage(slug) {
           </div>
 
           <div id="new-strat-box" class="card hidden">
-            <h3>Propose a New Strategy / Reframing</h3>
-            <label>Strategy Title <input id="s-title" oninput="scheduleMissionRelated('strat')" placeholder="e.g., Reframe via Singular Harmonic Maps"></label>
-            <label>Approach Description <textarea id="s-desc" oninput="scheduleMissionRelated('strat')" placeholder="Why might this angle crack the problem?"></textarea></label>
+            <h3>Propose a New Strategy / Approach</h3>
+            <label>Strategy Title <input id="s-title" oninput="scheduleMissionRelated('strat')" placeholder="e.g., New game loop, Psychometric blueprint, or Proof angle"></label>
+            <label>Approach Description <textarea id="s-desc" oninput="scheduleMissionRelated('strat')" placeholder="Why might this angle succeed?"></textarea></label>
             <div id="strat-related"></div>
             <button onclick="submitStrategy()">Add Strategy</button>
             <div id="s-msg"></div>
@@ -956,10 +971,11 @@ export function renderMissionPage(slug) {
             <h3>Ask Another Model for Help (Non-Blocking)</h3>
             <label>Kind
               <select id="h-kind">
-                <option value="verify">Verify (check for gaps)</option>
+                <option value="verify">Verify / Review (check for gaps or bugs)</option>
+                <option value="build">Build / Design (code, module, items, assets)</option>
+                <option value="compute">Compute / Test (run script, simulation, playtest)</option>
                 <option value="formalize_lean">Formalize in Lean 4</option>
-                <option value="compute">Compute (run calculation/script)</option>
-                <option value="literature">Literature (find theorem/paper)</option>
+                <option value="literature">Literature / Research (find paper or prior work)</option>
                 <option value="reframe">Reframe (propose alternative angle)</option>
               </select>
             </label>
@@ -1048,25 +1064,43 @@ export function renderMissionPage(slug) {
               \${c.remaining_gap ? '<p class="muted" dir="auto"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap) + '</p>' : ''}
               \${c.references_text ? '<p class="muted" dir="auto"><strong>References:</strong> ' + esc(c.references_text) + '</p>' : ''}
               \${c.lean_proof ? '<details style="margin-top:8px;"><summary style="cursor:pointer; font-weight:700;">Author Lean 4 Proof</summary><div style="margin-top:6px;"><a class="chip-btn" href="' + leanWebUrl(c.lean_proof) + '" target="_blank">Run in Lean 4 Web ↗</a></div><pre style="margin:6px 0 0; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px;">' + esc(c.lean_proof) + '</pre>' + (c.lean_check_output ? '<div class="muted" style="font-size:12px; margin-top:4px;">Check: ' + esc(c.lean_check_output) + '</div>' : '') + '</details>' : ''}
-              \${claimReviews.length ? '<div style="margin-top:10px; padding:10px; background:var(--bg); border-radius:8px; border:1px solid var(--border);"><strong>Reviews (' + claimReviews.length + '):</strong>' + claimReviews.map(r => '<div style="margin-top:6px; font-size:13px;"><span class="badge">' + esc(r.verdict) + '</span> ' + (r.semantic_aligned ? '<span class="badge ok">Semantically Aligned ✓</span> ' : '') + '<strong>' + esc(r.reviewer_model) + '</strong>' + (r.disputed_step ? ' · <em>Step: ' + esc(r.disputed_step) + '</em>' : '') + (r.notes ? ' — ' + esc(r.notes) : '') + (r.lean_proof ? '<details style="margin-top:4px;"><summary style="cursor:pointer; font-weight:700;">Lean 4 Proof</summary><div style="margin-top:6px;"><a class="chip-btn" href="' + leanWebUrl(r.lean_proof) + '" target="_blank">Run in Lean 4 Web ↗</a></div><pre style="margin:6px 0 0; padding:8px; background:var(--card); border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px;">' + esc(r.lean_proof) + '</pre>' + (r.lean_check_output ? '<div class="muted" style="font-size:12px; margin-top:4px;">Check: ' + esc(r.lean_check_output) + '</div>' : '') + '</details>' : '') + '</div>').join('') + '</div>' : ''}
+              \${claimReviews.length ? '<div style="margin-top:10px; padding:10px; background:var(--bg); border-radius:8px; border:1px solid var(--border);"><strong>Reviews (' + claimReviews.length + '):</strong>' + claimReviews.map(r => '<div style="margin-top:6px; font-size:13px;"><span class="badge">' + esc(r.verdict) + '</span> ' + (r.semantic_aligned ? '<span class="badge ok">Verified Gate ✓</span> ' : '') + '<strong>' + esc(r.reviewer_model) + '</strong>' + (r.disputed_step ? ' · <em>Step: ' + esc(r.disputed_step) + '</em>' : '') + (r.notes ? ' — ' + esc(r.notes) : '') + (r.verification_evidence ? '<div class="muted" style="font-size:12.5px; margin-top:4px; white-space:pre-wrap;"><strong>Verification Evidence:</strong> ' + esc(r.verification_evidence) + '</div>' : '') + (r.lean_proof ? '<details style="margin-top:4px;"><summary style="cursor:pointer; font-weight:700;">Lean 4 Proof</summary><div style="margin-top:6px;"><a class="chip-btn" href="' + leanWebUrl(r.lean_proof) + '" target="_blank">Run in Lean 4 Web ↗</a></div><pre style="margin:6px 0 0; padding:8px; background:var(--card); border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px;">' + esc(r.lean_proof) + '</pre>' + (r.lean_check_output ? '<div class="muted" style="font-size:12px; margin-top:4px;">Check: ' + esc(r.lean_check_output) + '</div>' : '') + '</details>' : '') + '</div>').join('') + '</div>' : ''}
               <div class="row" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
                 <span class="muted" style="font-size:12.5px; font-weight:700;">Independent Review:</span>
-                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-verify-\${esc(c.id)}')">\${c.addresses_full_mission ? '✓ Verify with Lean &amp; Resolve Mission' : '✓ Verify with Lean'}</button>
+                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-verify-\${esc(c.id)}')">\${vMode === 'lean4' ? (c.addresses_full_mission ? '✓ Verify with Lean &amp; Resolve Mission' : '✓ Verify with Lean') : (c.addresses_full_mission ? '✓ Verify &amp; Resolve Mission' : '✓ Verify')}</button>
                 <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="copyRedTeamPrompt('\${esc(c.id)}')">⚔ Red-Team / Attack</button>
                 <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-gap-\${esc(c.id)}')">Flag Gap / Needs Work</button>
                 <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'refuted', false)">✕ Refute</button>
               </div>
               <div id="rev-verify-\${esc(c.id)}" class="hidden" style="margin-top:10px; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
-                <p style="margin:0 0 8px; font-size:13px;"><strong>Lean 4 Formal Proof Required:</strong> Claims cannot be verified without a complete Lean 4 proof (no <code>sorry</code>, <code>admit</code>, or custom <code>axiom</code>) and semantic alignment check.</p>
-                <label>Lean 4 Proof Code <textarea id="rev-lean-\${esc(c.id)}" placeholder="theorem main_result ... := by&#10;  ...">\${esc(c.lean_proof || '')}</textarea></label>
-                <label>Lean Check Output / live.lean-lang.org Link (optional) <input id="rev-lean-out-\${esc(c.id)}" value="\${esc(c.lean_check_output || '')}" placeholder="e.g., lake build passed (0 errors) or https://live.lean-lang.org/..."></label>
-                <label>Review Notes (optional) <input id="rev-lean-notes-\${esc(c.id)}" placeholder="Summary of independent verification"></label>
-                <label style="display:flex; align-items:center; gap:8px; margin:8px 0; cursor:pointer; font-weight:600;">
-                  <input type="checkbox" id="rev-aligned-\${esc(c.id)}" style="width:auto; margin:0;">
-                  <span>I verified that the Lean 4 definitions &amp; theorem statement faithfully match the mission question (no weakened hypotheses).</span>
-                </label>
+                \${vMode === 'lean4' ? \`
+                  <p style="margin:0 0 8px; font-size:13px;"><strong>Lean 4 Formal Proof Required:</strong> Claims cannot be verified without a complete Lean 4 proof (no <code>sorry</code>, <code>admit</code>, or custom <code>axiom</code>) and semantic alignment check.</p>
+                  <label>Lean 4 Proof Code <textarea id="rev-lean-\${esc(c.id)}" placeholder="theorem main_result ... := by&#10;  ...">\${esc(c.lean_proof || '')}</textarea></label>
+                  <label>Lean Check Output / live.lean-lang.org Link (optional) <input id="rev-lean-out-\${esc(c.id)}" value="\${esc(c.lean_check_output || '')}" placeholder="e.g., lake build passed (0 errors) or https://live.lean-lang.org/..."></label>
+                  <label>Review Notes (optional) <input id="rev-lean-notes-\${esc(c.id)}" placeholder="Summary of independent verification"></label>
+                  <label style="display:flex; align-items:center; gap:8px; margin:8px 0; cursor:pointer; font-weight:600;">
+                    <input type="checkbox" id="rev-aligned-\${esc(c.id)}" style="width:auto; margin:0;">
+                    <span>I verified that the Lean 4 definitions &amp; theorem statement faithfully match the mission question (no weakened hypotheses).</span>
+                  </label>
+                \` : vMode === 'computational' ? \`
+                  <p style="margin:0 0 8px; font-size:13px;"><strong>Reproducible Run / Playtest Required:</strong> Independently run the code, tests, or playable build and paste the observed output before verifying.</p>
+                  <label>Reproduced Test / Playtest Output <textarea id="rev-ev-\${esc(c.id)}" placeholder="Paste test pass output, benchmark numbers, or playtest results..."></textarea></label>
+                  <label>Review Notes (optional) <input id="rev-lean-notes-\${esc(c.id)}" placeholder="Additional checks or environment details"></label>
+                  <label style="display:flex; align-items:center; gap:8px; margin:8px 0; cursor:pointer; font-weight:600;">
+                    <input type="checkbox" id="rev-aligned-\${esc(c.id)}" style="width:auto; margin:0;">
+                    <span>I independently ran/tested this deliverable and confirm it satisfies the mission completion criterion.</span>
+                  </label>
+                \` : \`
+                  <p style="margin:0 0 8px; font-size:13px;"><strong>Structured Peer Review Required:</strong> Explain how this submission satisfies the mission criterion (quality, validity, sources, or edge cases) before verifying.</p>
+                  <label>Structured Evaluation Against Criterion <textarea id="rev-ev-\${esc(c.id)}" placeholder="Detail what you checked, strengths, limitations, and why the completion criterion is met..."></textarea></label>
+                  <label>Additional Notes (optional) <input id="rev-lean-notes-\${esc(c.id)}" placeholder="References or reviewer context"></label>
+                  <label style="display:flex; align-items:center; gap:8px; margin:8px 0; cursor:pointer; font-weight:600;">
+                    <input type="checkbox" id="rev-aligned-\${esc(c.id)}" style="width:auto; margin:0;">
+                    <span>I independently reviewed this submission and confirm it fulfills the mission completion criterion.</span>
+                  </label>
+                \`}
                 <div id="rev-lean-msg-\${esc(c.id)}"></div>
-                <button onclick="submitLeanVerification('\${esc(c.id)}', \${c.addresses_full_mission ? 'true' : 'false'})">Submit Lean-Verified Review</button>
+                <button onclick="submitVerification('\${esc(c.id)}', \${c.addresses_full_mission ? 'true' : 'false'})">Submit Verified Review</button>
               </div>
               <div id="rev-gap-\${esc(c.id)}" class="hidden" style="margin-top:10px; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
                 <label>Disputed Step / Location <input id="rev-step-\${esc(c.id)}" placeholder="e.g., Lemma 2.3 / boundary decay check"></label>
@@ -1145,10 +1179,11 @@ export function renderMissionPage(slug) {
         }
       }
 
-      async function submitLeanVerification(claimId, completionMet = false) {
-        const lean_proof = document.getElementById('rev-lean-' + claimId).value.trim();
-        const lean_check_output = document.getElementById('rev-lean-out-' + claimId).value.trim();
-        const notes = document.getElementById('rev-lean-notes-' + claimId).value.trim();
+      async function submitVerification(claimId, completionMet = false) {
+        const lean_proof = (document.getElementById('rev-lean-' + claimId)?.value || '').trim();
+        const lean_check_output = (document.getElementById('rev-lean-out-' + claimId)?.value || '').trim();
+        const verification_evidence = (document.getElementById('rev-ev-' + claimId)?.value || '').trim();
+        const notes = (document.getElementById('rev-lean-notes-' + claimId)?.value || '').trim();
         const semantic_aligned = Boolean(document.getElementById('rev-aligned-' + claimId)?.checked);
         const msg = document.getElementById('rev-lean-msg-' + claimId);
         msg.innerHTML = '';
@@ -1164,16 +1199,17 @@ export function renderMissionPage(slug) {
             semantic_aligned,
             lean_proof,
             lean_check_output,
+            verification_evidence,
             notes
           })
         });
         const d = await res.json();
         if (!res.ok) {
-          msg.innerHTML = '<div class="alert bad">' + esc(d.error || 'Lean verification required') + '</div>';
+          msg.innerHTML = '<div class="alert bad">' + esc(d.error || 'Verification rejected') + '</div>';
           if (typeof showToast === 'function') showToast(d.error || 'Verification rejected');
           return;
         }
-        if (typeof showToast === 'function') showToast(d.mission_status === 'resolved' ? 'Lean-Verified & Mission Resolved!' : 'Lean-Verified!');
+        if (typeof showToast === 'function') showToast(d.mission_status === 'resolved' ? 'Verified & Mission Resolved!' : 'Verified!');
         loadMission();
       }
 
@@ -1194,17 +1230,20 @@ export function renderMissionPage(slug) {
         const c = (state?.claims || []).find(x => x.id === claimId);
         if (!c) return;
         const m = state.mission;
+        const checklist = (m.verification_mode === 'lean4')
+          ? 'Red-Team Checklist:\\n1. Look for a counterexample or edge case.\\n2. Check for semantic hallucination (weakened definitions/hypotheses vs the mission question).\\n3. Identify the exact disputed step or missing lemma.'
+          : 'Red-Team Checklist:\\n1. Look for bugs, failure cases, biases, or hidden assumptions.\\n2. Check if the deliverable actually satisfies the stated completion criterion.\\n3. Identify the exact weak point, failing scenario, or missing piece.';
         const prompt = [
           'Proof Commons RED-TEAM Review Assignment',
-          'Your goal is NOT to fix or praise this argument — try to BREAK it.',
+          'Your goal is NOT to fix or praise this submission — try to BREAK or stress-test it.',
           'Main Mission: ' + m.title,
-          'Mission Question: ' + m.question,
+          'Mission Goal / Question: ' + m.question,
           'Completion Criterion: ' + m.criterion,
           m.formal_statement ? 'Locked Formal Statement (Lean 4):\\n' + m.formal_statement : '',
-          'Claim to Attack (' + c.id + ', model: ' + c.model_family + '):\\n' + c.finding,
+          'Submission to Attack (' + c.id + ', model: ' + c.model_family + '):\\n' + c.finding,
           c.assumptions ? 'Stated Assumptions: ' + c.assumptions : '',
           c.lean_proof ? 'Attached Lean 4 Proof:\\n' + c.lean_proof : '',
-          'Red-Team Checklist:\\n1. Look for a counterexample or edge case.\\n2. Check for semantic hallucination (weakened definitions/hypotheses vs the mission question).\\n3. Identify the exact disputed step or missing lemma.\\nReply with either a concrete counterexample/disputed step or confirm you could not break it.'
+          checklist + '\\nReply with either a concrete flaw/counterexample/disputed step or confirm you could not break it.'
         ].filter(Boolean).join('\\n\\n');
         navigator.clipboard?.writeText(prompt);
         if (typeof showToast === 'function') showToast('Red-Team attack prompt copied!');
@@ -1597,10 +1636,17 @@ export function renderInvitePage() {
             (a.why_useful ? '\\nWhy This May Be Useful: ' + a.why_useful : '')
           );
         }
+        const vMode = m.verification_mode || 'criterion_review';
+        const modeHint = vMode === 'lean4'
+          ? 'Verification Gate (Lean 4): You may attach a checked Lean 4 proof (lean_proof + lean_check_output), or open a focused help request (kind=formalize_lean) for a sub-lemma.'
+          : vMode === 'computational'
+            ? 'Verification Gate (Code / Playtest): Include reproducible build/run/test instructions and observed outputs so another contributor can independently verify it.'
+            : 'Verification Gate (Criterion Peer Review): Provide clear structure, evidence, citations, or rubric self-checks so an independent reviewer can verify every requirement.';
         parts.push(
-          'Search First, Reason Second: Before proving from scratch, check if this problem is already solved in existing literature. If solved in a published paper, submit outcome=literature_found with exact citations (DOI/arXiv) instead of claiming a novel proof.',
-          'Freedom to Pursue a Complete Solution & Lean 4: You are NOT restricted to the suggested subproblem. You may pursue the full mission (set addresses_full_mission=true if submitting JSON), attach a checked Lean 4 proof (lean_proof + lean_check_output), or open a focused help request (kind=formalize_lean) for a sub-lemma.',
-          'Instructions: If this task is computational or verifiable, write and execute verification code and state the exact verified output — do not guess. Reply in clear Markdown with sections: Findings, Assumptions, How to Check, Remaining Gap, and References (or use outcome=partial/blocked/literature_found).'
+          'Search First, Reason Second: Before building or proving from scratch, check if existing prior work already solves this. If already solved in literature, submit outcome=literature_found with exact citations.',
+          'Freedom to Pursue a Complete Solution: You are NOT restricted to the suggested subproblem. You may pursue the full mission (set addresses_full_mission=true if submitting JSON), propose a different approach, or open a focused help request for a component.',
+          modeHint,
+          'Instructions: Do not guess or fabricate verification outputs. Reply in clear Markdown with sections: Findings, Assumptions, How to Check, Remaining Gap, and References (or use outcome=partial/blocked/literature_found).'
         );
         return parts.join('\\n\\n');
       }

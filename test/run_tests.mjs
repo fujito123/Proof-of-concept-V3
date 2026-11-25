@@ -546,4 +546,106 @@ const leanHelp = await call('/v1/agent', {
 });
 assert.equal(leanHelp.status, 201);
 
-console.log('ALL_10_SCENARIOS_PASSED');
+// Scenario 11: Inclusive non-math missions (computational game + criterion_review psychology test)
+const gameMission = await call('/api/missions', {
+  method: 'POST',
+  body: {
+    title: 'Collaborative Browser Co-op Puzzle Game',
+    domain: 'Game Dev',
+    verification_mode: 'computational',
+    question: 'Build a playable 2-player browser puzzle game with deterministic level validation and zero runtime console errors.',
+    criterion: 'Playable HTML/JS build with automated unit tests passing and verified playtest through all 5 levels.',
+  },
+});
+assert.equal(gameMission.status, 201);
+assert.equal(gameMission.json.mission.verification_mode, 'computational');
+
+const gameDraw = await call('/api/agent/v1/draw', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { mission_id: gameMission.json.mission.id, scope: 'full_mission', model_family: 'Claude', agent_session: 'game_author' },
+});
+const gameSubmit = await call(`/api/agent/v1/runs/${gameDraw.json.run_id}/handoff`, {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: {
+    outcome: 'candidate_answer',
+    addresses_full_mission: true,
+    finding: 'Implemented 5-level co-op puzzle engine with keyboard controls and level solver.',
+    how_to_check: 'Run npm test and play levels 1-5 in Chrome.',
+  },
+});
+assert.equal(gameSubmit.status, 200);
+// Must reject 1-click verify without run/playtest output
+const badGameRev = await call('/api/reviews', {
+  method: 'POST',
+  body: { claim_id: gameSubmit.json.claim_id, reviewer_session: 'game_rev', verdict: 'verified', completion_met: true, semantic_aligned: true },
+});
+assert.equal(badGameRev.status, 400);
+// Succeeds with reproducible run/playtest output (no Lean 4 required!)
+const okGameRev = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: gameSubmit.json.claim_id,
+    reviewer_session: 'game_rev',
+    reviewer_model: 'GPT',
+    verdict: 'verified',
+    completion_met: true,
+    semantic_aligned: true,
+    verification_evidence: 'Ran npm test (18/18 passed) and completed playtest of all 5 co-op levels with zero console errors.',
+  },
+});
+assert.equal(okGameRev.status, 200);
+assert.equal(okGameRev.json.mission_status, 'resolved');
+
+const psychMission = await call('/api/missions', {
+  method: 'POST',
+  body: {
+    title: 'Design a Stress-Resilience Psychological Assessment Scale',
+    domain: 'Psychology',
+    verification_mode: 'criterion_review',
+    question: 'Create a 20-item Likert scale measuring workplace stress resilience with reverse-coded items, scoring rubric, and construct validity rationale.',
+    criterion: 'All 20 items map clearly to 4 sub-factors, include reverse-coded items, avoid double-barreled wording, and include a scoring manual.',
+  },
+});
+assert.equal(psychMission.status, 201);
+assert.equal(psychMission.json.mission.verification_mode, 'criterion_review');
+
+const psychDraw = await call('/api/agent/v1/draw', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { mission_id: psychMission.json.mission.id, scope: 'full_mission', model_family: 'Gemini', agent_session: 'psych_author' },
+});
+const psychSubmit = await call(`/api/agent/v1/runs/${psychDraw.json.run_id}/handoff`, {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: {
+    outcome: 'candidate_answer',
+    addresses_full_mission: true,
+    finding: 'Drafted 20-item 4-factor stress-resilience inventory with 6 reverse-coded items and scoring rubric.',
+  },
+});
+assert.equal(psychSubmit.status, 200);
+// Rejects 1-click verify without structured criterion evaluation
+const badPsychRev = await call('/api/reviews', {
+  method: 'POST',
+  body: { claim_id: psychSubmit.json.claim_id, reviewer_session: 'psych_rev', verdict: 'verified', completion_met: true, semantic_aligned: true, notes: 'ok' },
+});
+assert.equal(badPsychRev.status, 400);
+// Succeeds with structured criterion review + alignment sign-off
+const okPsychRev = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: psychSubmit.json.claim_id,
+    reviewer_session: 'psych_rev',
+    reviewer_model: 'Human',
+    verdict: 'verified',
+    completion_met: true,
+    semantic_aligned: true,
+    verification_evidence: 'Checked all 20 items across the 4 sub-factors: no double-barreled items, 6 reverse-coded items verified, scoring thresholds clear.',
+  },
+});
+assert.equal(okPsychRev.status, 200);
+assert.equal(okPsychRev.json.mission_status, 'resolved');
+
+console.log('ALL_11_SCENARIOS_PASSED');

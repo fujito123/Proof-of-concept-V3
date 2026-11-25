@@ -1,6 +1,6 @@
 -- Seed missions illustrating the long-tail open-science vision + testbed problems
 
-INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status) VALUES
+INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status, verification_mode) VALUES
 (
   'mission-bh-balance',
   'multi-black-hole-equilibrium',
@@ -9,7 +9,8 @@ INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, d
   'Determine whether exact stationary, axisymmetric, asymptotically flat solutions to 4D Einstein-Maxwell electrovacuum (Lambda = 0) exist for n >= 2 aligned, disconnected, subextremal (kappa_i > 0) black holes without conical struts or naked singularities.',
   'Provide either an explicit regular subextremal parameter point or a complete proof of non-existence mapping all physical conditions.',
   'Physics & GR',
-  'active'
+  'active',
+  'lean4'
 ),
 (
   'mission-curling-49',
@@ -19,7 +20,8 @@ INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, d
   'Find the exact value of a(49), the maximum curling number over all finite sequences starting from a binary string of length 49, without unproved heuristic pruning.',
   'Exhibit a length-49 witness achieving a(49) and a reproducible exhaustive proof ruling out any higher value.',
   'Combinatorics',
-  'active'
+  'active',
+  'lean4'
 ),
 (
   'mission-urban-shade',
@@ -29,7 +31,8 @@ INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, d
   'Using published urban-canyon CFD and energy-balance models, derive the optimal tree-canopy coverage fraction and spacing-to-height (H/W) threshold where daytime thermal comfort gains outweigh nighttime heat trapping in hot-summer Mediterranean climates.',
   'Synthesize quantitative thresholds from peer-reviewed literature with explicit parameter bounds and sensitivity checks.',
   'Urban Science',
-  'active'
+  'active',
+  'criterion_review'
 ),
 (
   'mission-hadwiger-nelson-5',
@@ -39,7 +42,8 @@ INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, d
   'Construct an explicit finite unit-distance graph G in the Euclidean plane R^2 with |V(G)| < 509 and chromatic number chi(G) >= 5, OR prove a non-trivial new lower bound on the minimum vertex count of any 5-chromatic unit-distance graph.',
   'Provide exact algebraic/symbolic vertex coordinates, verify every edge has Euclidean length 1, and supply an independent SAT/UNSAT certificate or proof that G is not 4-colorable.',
   'Discrete Geometry',
-  'active'
+  'active',
+  'lean4'
 );
 
 INSERT OR IGNORE INTO strategies (id, mission_id, title, description, author_label, model_family, status, p_viable) VALUES

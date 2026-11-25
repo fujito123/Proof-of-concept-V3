@@ -132,7 +132,7 @@ async function runAutoVerifier(env, { missionId, claimId, finding, how_to_check 
 
 async function getMissionBriefContext(env, missionId, opts = {}) {
   const mission = await env.DB.prepare(
-    `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary, formal_statement FROM missions WHERE id = ?`
+    `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary, formal_statement, verification_mode FROM missions WHERE id = ?`
   ).bind(missionId).first();
   const { results: claims } = await env.DB.prepare(`
     SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, addresses_full_mission, lean_proof, lean_check_output, verification_status, model_family, created_at
@@ -244,6 +244,11 @@ async function validateLeanProof(env, leanProofRaw, leanCheckOutputRaw) {
   return { ok: true, proof, checkOut };
 }
 
+const VERIFICATION_MODES = ["lean4", "computational", "criterion_review"];
+function normalizeVerificationMode(v) {
+  return VERIFICATION_MODES.includes(v) ? v : "criterion_review";
+}
+
 const migratedDbs = new WeakSet();
 
 async function ensureSchemaAndSeed(env) {
@@ -260,6 +265,8 @@ async function ensureSchemaAndSeed(env) {
     `ALTER TABLE claims ADD COLUMN lean_proof TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE claims ADD COLUMN lean_check_output TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE reviews ADD COLUMN semantic_aligned INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE missions ADD COLUMN verification_mode TEXT NOT NULL DEFAULT 'criterion_review'`,
+    `ALTER TABLE reviews ADD COLUMN verification_evidence TEXT NOT NULL DEFAULT ''`,
   ];
   for (const sql of alterStatements) {
     try { await env.DB.prepare(sql).run(); } catch (_) { /* column already exists */ }
@@ -280,7 +287,7 @@ async function ensureSchemaAndSeed(env) {
   } catch (_) { /* best effort */ }
   try {
     await env.DB.prepare(`
-      INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status) VALUES (
+      INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status, verification_mode) VALUES (
         'mission-hadwiger-nelson-5',
         'hadwiger-nelson-5-chromatic-minimization',
         'Can we construct a 5-chromatic unit-distance graph in R^2 with fewer than 509 vertices?',
@@ -288,9 +295,13 @@ async function ensureSchemaAndSeed(env) {
         'Construct an explicit finite unit-distance graph G in the Euclidean plane R^2 with |V(G)| < 509 and chromatic number chi(G) >= 5, OR prove a non-trivial new lower bound on the minimum vertex count of any 5-chromatic unit-distance graph.',
         'Provide exact algebraic/symbolic vertex coordinates, verify every edge has Euclidean length 1, and supply an independent SAT/UNSAT certificate or proof that G is not 4-colorable.',
         'Discrete Geometry',
-        'active'
+        'active',
+        'lean4'
       )
     `).run();
+    await env.DB.prepare(
+      `UPDATE missions SET verification_mode = 'lean4' WHERE id IN ('mission-bh-balance', 'mission-curling-49', 'mission-hadwiger-nelson-5') AND verification_mode = 'criterion_review'`
+    ).run();
     await env.DB.prepare(`
       INSERT OR IGNORE INTO strategies (id, mission_id, title, description, author_label, model_family, status, p_viable) VALUES (
         'strat-hn-sat',
@@ -527,21 +538,22 @@ export default {
         const summary = String(body.summary || title).trim();
         const domain = String(body.domain || "General").trim();
         const formalStatement = String(body.formal_statement || "").trim();
+        const verificationMode = normalizeVerificationMode(body.verification_mode);
         if (title.length < 3 || question.length < 3 || criterion.length < 3) {
           return json({ error: "Title, question, and criterion are required." }, 400);
         }
         const id = uid("mission");
         const slug = slugify(title) + "-" + id.slice(-4);
         await env.DB.prepare(
-          `INSERT INTO missions (id, slug, title, summary, question, criterion, domain, formal_statement) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO missions (id, slug, title, summary, question, criterion, domain, formal_statement, verification_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(id, slug, title, summary, question, criterion, domain, formalStatement)
+          .bind(id, slug, title, summary, question, criterion, domain, formalStatement, verificationMode)
           .run();
         const stratId = uid("strat");
         await env.DB.prepare(
           `INSERT INTO strategies (id, mission_id, title, description, author_label, model_family) VALUES (?, ?, ?, ?, 'Author', 'Human')`
         )
-          .bind(stratId, id, "Initial Exploration Strategy", "Open starting branch for first literature, computation, or proof steps.")
+          .bind(stratId, id, "Initial Exploration Strategy", "Open starting branch for first literature, computation, prototype, or proof steps.")
           .run();
         await env.DB.prepare(
           `INSERT INTO help_requests (id, mission_id, strategy_id, kind, title, question, criterion, prefer_different_model, requested_by_model) VALUES (?, ?, ?, 'reframe', ?, ?, ?, 0, 'Human')`
@@ -552,6 +564,16 @@ export default {
         // findRelated backfills/caches the new mission's embedding when Workers AI is bound
         const similar = await safeRelatedIdeas(env, { itemId: id, excludeMissionId: id, limit: 5 });
         return json({ mission, similar_existing: similar.items, related_engine: similar.engine }, 201);
+      }
+
+      if (method === "POST" && path.match(/^\/api\/missions\/([^/]+)\/verification-mode$/)) {
+        const slugOrId = decodeURIComponent(path.match(/^\/api\/missions\/([^/]+)\/verification-mode$/)[1]);
+        const mission = await env.DB.prepare(`SELECT * FROM missions WHERE slug = ? OR id = ?`).bind(slugOrId, slugOrId).first();
+        if (!mission) return json({ error: "Mission not found" }, 404);
+        const body = await request.json();
+        const mode = normalizeVerificationMode(body.verification_mode);
+        await env.DB.prepare(`UPDATE missions SET verification_mode = ? WHERE id = ?`).bind(mode, mission.id).run();
+        return json({ ok: true, mission_id: mission.id, verification_mode: mode });
       }
 
       if (method === "POST" && path.match(/^\/api\/missions\/([^/]+)\/formal-statement$/)) {
@@ -666,29 +688,53 @@ export default {
         if (claim.author_session && body.reviewer_session && claim.author_session === body.reviewer_session) {
           return json({ error: "Anti-self-review: you cannot review your own submission." }, 403);
         }
+        const parentMission = await env.DB.prepare(`SELECT id, title, verification_mode FROM missions WHERE id = ?`).bind(claim.mission_id).first();
+        const mode = normalizeVerificationMode(parentMission?.verification_mode);
         const verdict = ["verified", "needs_work", "refuted"].includes(body.verdict) ? body.verdict : "needs_work";
         let leanProof = String(body.lean_proof || "").trim();
         let leanCheckOutput = String(body.lean_check_output || "").trim();
+        let verificationEvidence = String(body.verification_evidence || "").trim();
+        const notes = String(body.notes || "").trim();
         const semanticAligned = verdict === "verified" && body.semantic_aligned === true ? 1 : 0;
+
         if (verdict === "verified") {
-          const check = await validateLeanProof(env, leanProof, leanCheckOutput);
-          if (!check.ok) {
-            return json({ error: check.error }, 400);
+          if (mode === "lean4") {
+            const check = await validateLeanProof(env, leanProof, leanCheckOutput);
+            if (!check.ok) {
+              return json({ error: check.error }, 400);
+            }
+            if (semanticAligned !== 1) {
+              return json({ error: "Verification rejected: confirm semantic_aligned=true to certify that the Lean 4 statement matches the mission question without weakened hypotheses." }, 400);
+            }
+            leanProof = check.proof;
+            leanCheckOutput = check.checkOut;
+          } else if (mode === "computational") {
+            const evidenceText = verificationEvidence || leanCheckOutput || notes;
+            if (evidenceText.length < 20) {
+              return json({ error: "Verification rejected: this computational/software mission requires reproducible run, test, or playtest output (verification_evidence >= 20 chars)." }, 400);
+            }
+            if (semanticAligned !== 1) {
+              return json({ error: "Verification rejected: confirm semantic_aligned=true to certify that your independent run/playtest satisfies the mission criterion." }, 400);
+            }
+            verificationEvidence = evidenceText;
+          } else {
+            const evidenceText = verificationEvidence || notes;
+            if (evidenceText.length < 25) {
+              return json({ error: "Verification rejected: provide a structured peer-review evaluation against the mission criterion (verification_evidence or notes >= 25 chars)." }, 400);
+            }
+            if (semanticAligned !== 1) {
+              return json({ error: "Verification rejected: confirm semantic_aligned=true to certify that this submission fulfills the mission criterion." }, 400);
+            }
+            verificationEvidence = evidenceText;
           }
-          if (semanticAligned !== 1) {
-            return json({ error: "Verification rejected: confirm semantic_aligned=true to certify that the Lean 4 statement matches the mission question without weakened hypotheses." }, 400);
-          }
-          leanProof = check.proof;
-          leanCheckOutput = check.checkOut;
         }
         const completionMet = verdict === "verified" && body.completion_met === true ? 1 : 0;
         const disputedStep = String(body.disputed_step || "").trim();
-        const notes = String(body.notes || "").trim();
         const reviewId = uid("rev");
         await env.DB.prepare(
-          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes, lean_proof, lean_check_output, semantic_aligned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes, lean_proof, lean_check_output, verification_evidence, semantic_aligned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes, leanProof, leanCheckOutput, semanticAligned)
+          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes, leanProof, leanCheckOutput, verificationEvidence, semanticAligned)
           .run();
 
         const nextStatus = verdict === "verified" ? "verified" : verdict === "refuted" ? "refuted" : "unverified";
@@ -699,10 +745,11 @@ export default {
           `UPDATE help_requests SET status = 'answered' WHERE target_claim_id = ? AND kind = 'verify' AND status = 'open'`
         ).bind(claim.id).run();
 
-        // Resolve mission ONLY when an independent review verifies a full-mission candidate with a Lean proof and confirms completion_met
+        // Resolve mission ONLY when an independent review verifies a full-mission candidate under its verification_mode and confirms completion_met
         let mission_status = null;
         if (verdict === "verified" && completionMet === 1 && claim.addresses_full_mission === 1) {
-          const summary = `Lean-verified by independent ${body.reviewer_model || "reviewer"} (${reviewId}) on claim ${claim.id}.`;
+          const modeLabel = mode === "lean4" ? "Lean 4 verified" : mode === "computational" ? "Reproducibly verified" : "Peer-review verified";
+          const summary = `${modeLabel} by independent ${body.reviewer_model || "reviewer"} (${reviewId}) on claim ${claim.id}.`;
           await env.DB.prepare(`UPDATE missions SET status = 'resolved', resolution_summary = ? WHERE id = ?`).bind(summary, claim.mission_id).run();
           mission_status = "resolved";
         } else {
@@ -837,22 +884,37 @@ export default {
           how_to_check: parsed.how_to_check,
         });
 
-        const mission = await env.DB.prepare(`SELECT id, slug, title, criterion, formal_statement, status FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+        const mission = await env.DB.prepare(`SELECT id, slug, title, criterion, formal_statement, verification_mode, status FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+        const mode = normalizeVerificationMode(mission?.verification_mode);
         const claimUrl = `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`;
 
         // Full-mission candidate solutions enter independent review of the exact submitted version
         let review_help_id = null;
         if (addressesFullMission) {
           review_help_id = uid("help");
+          const modeNote = mode === "lean4"
+            ? (parsed.lean_proof
+                ? `Author attached a Lean 4 proof (${parsed.lean_proof.length} chars) — check semantic alignment with the mission question and run it.`
+                : `No Lean 4 proof attached yet. You may formalize and run it in Lean 4 yourself, OR open a focused ask-for-help request (kind: formalize_lean) for a sub-lemma if needed.`)
+            : mode === "computational"
+              ? `Verification Mode: Reproducible Run / Playtest. Run the code, tests, or playable build independently and record exact verification output.`
+              : `Verification Mode: Structured Criterion Peer Review. Evaluate the submission rigorously against the mission criterion, check edge cases/biases, and record detailed findings.`;
+
           const reviewQuestion = [
             `Independently review candidate mission solution ${claimId} (${claimUrl}).`,
             `Full Mission Criterion: ${mission.criterion}`,
-            mission.formal_statement ? `Locked Formal Statement (Lean 4):\n${mission.formal_statement}` : "",
+            mode === "lean4" && mission.formal_statement ? `Locked Formal Statement (Lean 4):\n${mission.formal_statement}` : "",
             parsed.assumptions ? `Stated Assumptions: ${parsed.assumptions}` : "",
             parsed.how_to_check ? `Reproduction / Check Instructions: ${parsed.how_to_check}` : "",
-            parsed.lean_proof ? `Author attached a Lean 4 proof (${parsed.lean_proof.length} chars) — check semantic alignment with the mission question and run it.` : `No Lean 4 proof attached yet. You may formalize and run it in Lean 4 yourself, OR open a focused ask-for-help request (kind: formalize_lean) for a sub-lemma if needed.`,
-            `Verify whether the submitted argument meets the completion criterion, or identify a precise gap, counterexample, or semantic mismatch.`,
+            modeNote,
+            `Verify whether the submitted work meets the completion criterion, or identify a precise gap, bug, counterexample, or revision needed.`,
           ].filter(Boolean).join("\n\n");
+
+          const reviewTitle = mode === "lean4"
+            ? `Formalize in Lean 4 & review candidate ${claimId}`
+            : mode === "computational"
+              ? `Run / playtest & verify candidate ${claimId}`
+              : `Independent criterion review of candidate ${claimId}`;
 
           await env.DB.prepare(
             `INSERT INTO help_requests (id, mission_id, strategy_id, target_claim_id, kind, title, question, criterion, why_useful, prefer_different_model, requested_by_model, requested_by_session)
@@ -863,10 +925,10 @@ export default {
               assign.mission_id,
               helpReq?.strategy_id || null,
               claimId,
-              `Formalize in Lean 4 & review candidate ${claimId}`,
+              reviewTitle,
               reviewQuestion,
-              `Confirm semantic alignment and Lean 4 verification for ${claimId} (matching ${mission.criterion}) or record a disputed step/counterexample.`,
-              `Independent semantic + Lean 4 verification gate required before resolving mission ${mission.title}.`,
+              `Confirm whether ${claimId} satisfies the mission criterion (${mission.criterion}) with ${mode} verification evidence, or record a disputed step/gap.`,
+              `Independent ${mode} verification gate required before resolving mission ${mission.title}.`,
               modelFamily,
               agentSession
             )
