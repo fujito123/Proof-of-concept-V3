@@ -141,7 +141,36 @@ assert.equal(curlSubmit.json.auto_verified?.advisory_passed, true);
 assert.equal(curlSubmit.json.auto_verified?.verified, false);
 assert.equal(curlSubmit.json.mission_status, 'active');
 
-// Independent reviewer verifies and resolves the mission
+// Verification without a Lean 4 proof must be rejected (no accidental 1-click verify)
+const noLeanRev = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: curlSubmit.json.claim_id,
+    reviewer_session: 'independent_rev_1',
+    reviewer_model: 'GPT',
+    verdict: 'verified',
+    completion_met: true,
+  },
+});
+assert.equal(noLeanRev.status, 400);
+assert.ok(noLeanRev.json.error.includes('Lean 4'));
+
+// Verification with a sorry placeholder must also be rejected
+const sorryRev = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: curlSubmit.json.claim_id,
+    reviewer_session: 'independent_rev_1',
+    reviewer_model: 'GPT',
+    verdict: 'verified',
+    completion_met: true,
+    lean_proof: 'theorem curling_49_max : True := by sorry',
+  },
+});
+assert.equal(sorryRev.status, 400);
+assert.ok(sorryRev.json.error.includes('sorry'));
+
+// Independent reviewer verifies with a complete Lean 4 proof and resolves the mission
 const curlRev = await call('/api/reviews', {
   method: 'POST',
   body: {
@@ -150,12 +179,34 @@ const curlRev = await call('/api/reviews', {
     reviewer_model: 'GPT',
     verdict: 'verified',
     completion_met: true,
-    notes: 'Independently verified witness and exhaustive proof.',
+    lean_proof: 'theorem curling_49_witness : 131 = 131 := by rfl',
+    lean_check_output: 'lake build passed (0 errors)',
+    notes: 'Independently verified witness and exhaustive Lean 4 proof.',
   },
 });
 assert.equal(curlRev.status, 200);
 assert.equal(curlRev.json.verification_status, 'verified');
 assert.equal(curlRev.json.mission_status, 'resolved');
+
+// Reopen mission works and keeps UI/API safe from accidental resolution
+const reopenRes = await call('/api/missions/mission-curling-49/reopen', { method: 'POST' });
+assert.equal(reopenRes.status, 200);
+assert.equal(reopenRes.json.status, 'active');
+// Re-verify with Lean so Scenario 3 ends with a resolved mission as expected
+const curlRev2 = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: curlSubmit.json.claim_id,
+    reviewer_session: 'independent_rev_1',
+    reviewer_model: 'GPT',
+    verdict: 'verified',
+    completion_met: true,
+    lean_proof: 'theorem curling_49_witness : 131 = 131 := by rfl',
+    notes: 'Re-verified with Lean 4.',
+  },
+});
+assert.equal(curlRev2.status, 200);
+assert.equal(curlRev2.json.mission_status, 'resolved');
 
 // Scenario 4: Empty task queue still allows working on the full mission (no 404, no auto-created microtask)
 db.prepare(`UPDATE help_requests SET status = 'done' WHERE mission_id = 'mission-urban-shade'`).run();
@@ -412,10 +463,12 @@ assert.ok(fallback.json.related_ideas.length > 0);
 const pageFallback = await callEnv({ AI: brokenAI }, '/api/missions/multi-black-hole-equilibrium');
 assert.equal(pageFallback.status, 200);
 
-// UI exposes the related-ideas surfaces
+// UI exposes the related-ideas surfaces & Lean 4 verification gate
 const missionHtml = await call('/m/multi-black-hole-equilibrium');
 assert.ok(missionHtml.text.includes('Related Ideas Across Missions'));
 assert.ok(missionHtml.text.includes('checkRelated('));
+assert.ok(missionHtml.text.includes('Lean 4 Formal Proof Required'));
+assert.ok(!missionHtml.text.includes("reviewClaim(\\'\\'' + esc(c.id) + '\\', \\'verified\\'"));
 const homeHtml = await call('/');
 assert.ok(homeHtml.text.includes('checkRelated('));
 const inviteHtml = await call('/invite');

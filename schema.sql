@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   completion_met INTEGER NOT NULL DEFAULT 0,
   disputed_step TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
+  lean_proof TEXT NOT NULL DEFAULT '',
+  lean_check_output TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

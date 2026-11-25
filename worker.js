@@ -201,6 +201,43 @@ async function relatedRequest(env, src = {}) {
   };
 }
 
+async function validateLeanProof(env, leanProofRaw, leanCheckOutputRaw) {
+  const proof = String(leanProofRaw || "").trim();
+  const checkOut = String(leanCheckOutputRaw || "").trim();
+  if (proof.length < 20) {
+    return { ok: false, error: "Verification rejected: a complete Lean 4 proof (lean_proof) is required to mark a claim as verified." };
+  }
+  // Strip Lean line comments (-- ...) and block comments (/- ... -/) before checking declarations/placeholders
+  const stripped = proof
+    .replace(/\/-[\s\S]*?-\//g, " ")
+    .replace(/--[^\n]*/g, " ");
+  if (/\bsorry\b/.test(stripped) || /\badmit\b/.test(stripped)) {
+    return { ok: false, error: "Verification rejected: Lean 4 proof must not contain 'sorry' or 'admit'." };
+  }
+  if (/\baxiom\b/.test(stripped)) {
+    return { ok: false, error: "Verification rejected: Lean 4 proof must not introduce custom 'axiom' declarations." };
+  }
+  if (!/\b(theorem|lemma|def|example|structure|inductive)\b/.test(stripped) || !/(:=|\bby\b|\bwhere\b)/.test(stripped)) {
+    return { ok: false, error: "Verification rejected: provide valid Lean 4 code with a theorem/lemma/def declaration and proof body." };
+  }
+  if (env?.LEAN_VERIFIER_URL) {
+    try {
+      const res = await fetch(env.LEAN_VERIFIER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: proof }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false || data?.verified === false) {
+        return { ok: false, error: data?.error || "External Lean 4 verifier rejected the proof." };
+      }
+    } catch (err) {
+      return { ok: false, error: `External Lean 4 verifier unreachable: ${err?.message || err}` };
+    }
+  }
+  return { ok: true, proof, checkOut };
+}
+
 const migratedDbs = new WeakSet();
 
 async function ensureSchemaAndSeed(env) {
@@ -211,6 +248,8 @@ async function ensureSchemaAndSeed(env) {
     `ALTER TABLE help_requests ADD COLUMN disputed_step TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE reviews ADD COLUMN completion_met INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE reviews ADD COLUMN disputed_step TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE reviews ADD COLUMN lean_proof TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE reviews ADD COLUMN lean_check_output TEXT NOT NULL DEFAULT ''`,
   ];
   for (const sql of alterStatements) {
     try { await env.DB.prepare(sql).run(); } catch (_) { /* column already exists */ }
@@ -502,6 +541,20 @@ export default {
         return json({ mission, similar_existing: similar.items, related_engine: similar.engine }, 201);
       }
 
+      if (method === "POST" && path.match(/^\/api\/missions\/([^/]+)\/reopen$/)) {
+        const slugOrId = decodeURIComponent(path.match(/^\/api\/missions\/([^/]+)\/reopen$/)[1]);
+        const mission = await env.DB.prepare(`SELECT * FROM missions WHERE slug = ? OR id = ?`).bind(slugOrId, slugOrId).first();
+        if (!mission) return json({ error: "Mission not found" }, 404);
+        await env.DB.prepare(`UPDATE missions SET status = 'active', resolution_summary = NULL WHERE id = ?`).bind(mission.id).run();
+        // Reset verified claims on this mission that lack a Lean-verified review
+        await env.DB.prepare(`
+          UPDATE claims SET verification_status = 'unverified'
+          WHERE mission_id = ? AND verification_status = 'verified'
+            AND id NOT IN (SELECT claim_id FROM reviews WHERE verdict = 'verified' AND length(trim(lean_proof)) >= 20)
+        `).bind(mission.id).run();
+        return json({ ok: true, mission_id: mission.id, status: "active" });
+      }
+
       if (method === "GET" && path.startsWith("/api/missions/")) {
         const slug = decodeURIComponent(path.slice("/api/missions/".length));
         const mission = await env.DB.prepare(`SELECT * FROM missions WHERE slug = ? OR id = ?`).bind(slug, slug).first();
@@ -591,14 +644,24 @@ export default {
           return json({ error: "Anti-self-review: you cannot review your own submission." }, 403);
         }
         const verdict = ["verified", "needs_work", "refuted"].includes(body.verdict) ? body.verdict : "needs_work";
+        let leanProof = String(body.lean_proof || "").trim();
+        let leanCheckOutput = String(body.lean_check_output || "").trim();
+        if (verdict === "verified") {
+          const check = await validateLeanProof(env, leanProof, leanCheckOutput);
+          if (!check.ok) {
+            return json({ error: check.error }, 400);
+          }
+          leanProof = check.proof;
+          leanCheckOutput = check.checkOut;
+        }
         const completionMet = verdict === "verified" && body.completion_met === true ? 1 : 0;
         const disputedStep = String(body.disputed_step || "").trim();
         const notes = String(body.notes || "").trim();
         const reviewId = uid("rev");
         await env.DB.prepare(
-          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes, lean_proof, lean_check_output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes)
+          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes, leanProof, leanCheckOutput)
           .run();
 
         const nextStatus = verdict === "verified" ? "verified" : verdict === "refuted" ? "refuted" : "unverified";
@@ -609,13 +672,21 @@ export default {
           `UPDATE help_requests SET status = 'answered' WHERE target_claim_id = ? AND kind = 'verify' AND status = 'open'`
         ).bind(claim.id).run();
 
-        // Resolve mission ONLY when an independent review verifies a full-mission candidate and confirms completion_met
+        // Resolve mission ONLY when an independent review verifies a full-mission candidate with a Lean proof and confirms completion_met
         let mission_status = null;
         if (verdict === "verified" && completionMet === 1 && claim.addresses_full_mission === 1) {
-          const summary = `Verified by independent ${body.reviewer_model || "reviewer"} (${reviewId}) on claim ${claim.id}.`;
+          const summary = `Lean-verified by independent ${body.reviewer_model || "reviewer"} (${reviewId}) on claim ${claim.id}.`;
           await env.DB.prepare(`UPDATE missions SET status = 'resolved', resolution_summary = ? WHERE id = ?`).bind(summary, claim.mission_id).run();
           mission_status = "resolved";
         } else {
+          if (verdict === "needs_work" || verdict === "refuted") {
+            const remainingVerified = await env.DB.prepare(
+              `SELECT COUNT(*) AS cnt FROM claims WHERE mission_id = ? AND verification_status = 'verified' AND addresses_full_mission = 1`
+            ).bind(claim.mission_id).first();
+            if (!remainingVerified || remainingVerified.cnt === 0) {
+              await env.DB.prepare(`UPDATE missions SET status = 'active', resolution_summary = NULL WHERE id = ? AND status = 'resolved'`).bind(claim.mission_id).run();
+            }
+          }
           const m = await env.DB.prepare(`SELECT status FROM missions WHERE id = ?`).bind(claim.mission_id).first();
           mission_status = m?.status || "active";
         }

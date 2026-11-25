@@ -906,7 +906,7 @@ export function renderMissionPage(slug) {
             </div>
             <h1 style="margin-top:4px;" dir="auto">\${esc(mission.title)}</h1>
             <p class="muted" style="font-size:15px;" dir="auto">\${esc(mission.summary)}</p>
-            \${mission.resolution_summary ? '<div class="alert ok" style="margin-top:10px;"><strong>Resolved:</strong> ' + esc(mission.resolution_summary) + '</div>' : ''}
+            \${mission.status === 'resolved' ? '<div class="alert ok" style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;"><span><strong>Resolved:</strong> ' + esc(mission.resolution_summary || 'Marked as resolved.') + '</span><button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reopenMission()">Reopen Mission (Undo Verify)</button></div>' : ''}
 
             <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:14px; margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
               <div>
@@ -1030,14 +1030,20 @@ export function renderMissionPage(slug) {
               \${c.how_to_check ? '<p class="muted" dir="auto"><strong>How to check:</strong> ' + esc(c.how_to_check) + '</p>' : ''}
               \${c.remaining_gap ? '<p class="muted" dir="auto"><strong>Remaining gap:</strong> ' + esc(c.remaining_gap) + '</p>' : ''}
               \${c.references_text ? '<p class="muted" dir="auto"><strong>References:</strong> ' + esc(c.references_text) + '</p>' : ''}
-              \${claimReviews.length ? '<div style="margin-top:10px; padding:10px; background:var(--bg); border-radius:8px; border:1px solid var(--border);"><strong>Reviews (' + claimReviews.length + '):</strong>' + claimReviews.map(r => '<div style="margin-top:6px; font-size:13px;"><span class="badge">' + esc(r.verdict) + '</span> <strong>' + esc(r.reviewer_model) + '</strong>' + (r.disputed_step ? ' · <em>Step: ' + esc(r.disputed_step) + '</em>' : '') + (r.notes ? ' — ' + esc(r.notes) : '') + '</div>').join('') + '</div>' : ''}
+              \${claimReviews.length ? '<div style="margin-top:10px; padding:10px; background:var(--bg); border-radius:8px; border:1px solid var(--border);"><strong>Reviews (' + claimReviews.length + '):</strong>' + claimReviews.map(r => '<div style="margin-top:6px; font-size:13px;"><span class="badge">' + esc(r.verdict) + '</span> <strong>' + esc(r.reviewer_model) + '</strong>' + (r.disputed_step ? ' · <em>Step: ' + esc(r.disputed_step) + '</em>' : '') + (r.notes ? ' — ' + esc(r.notes) : '') + (r.lean_proof ? '<details style="margin-top:4px;"><summary style="cursor:pointer; font-weight:700;">Lean 4 Proof</summary><pre style="margin:6px 0 0; padding:8px; background:var(--card); border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px;">' + esc(r.lean_proof) + '</pre>' + (r.lean_check_output ? '<div class="muted" style="font-size:12px; margin-top:4px;">Check: ' + esc(r.lean_check_output) + '</div>' : '') + '</details>' : '') + '</div>').join('') + '</div>' : ''}
               <div class="row" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
                 <span class="muted" style="font-size:12.5px; font-weight:700;">Independent Review:</span>
-                \${c.addresses_full_mission
-                  ? '<button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim(\\'' + esc(c.id) + '\\', \\'verified\\', true)">✓ Verify &amp; Resolve Mission</button>'
-                  : '<button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim(\\'' + esc(c.id) + '\\', \\'verified\\', false)">✓ Verify</button>'}
+                <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-verify-\${esc(c.id)}')">\${c.addresses_full_mission ? '✓ Verify with Lean &amp; Resolve Mission' : '✓ Verify with Lean'}</button>
                 <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="toggleBox('rev-gap-\${esc(c.id)}')">Flag Gap / Needs Work</button>
                 <button class="secondary" style="padding:6px 12px; font-size:12.5px;" onclick="reviewClaim('\${esc(c.id)}', 'refuted', false)">✕ Refute</button>
+              </div>
+              <div id="rev-verify-\${esc(c.id)}" class="hidden" style="margin-top:10px; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+                <p style="margin:0 0 8px; font-size:13px;"><strong>Lean 4 Formal Proof Required:</strong> Claims cannot be verified without a complete Lean 4 proof (no <code>sorry</code>, <code>admit</code>, or custom <code>axiom</code>).</p>
+                <label>Lean 4 Proof Code <textarea id="rev-lean-\${esc(c.id)}" placeholder="theorem main_result ... := by&#10;  ..."></textarea></label>
+                <label>Lean Check Output / live.lean-lang.org Link (optional) <input id="rev-lean-out-\${esc(c.id)}" placeholder="e.g., lake build passed (0 errors) or https://live.lean-lang.org/..."></label>
+                <label>Review Notes (optional) <input id="rev-lean-notes-\${esc(c.id)}" placeholder="Summary of independent verification"></label>
+                <div id="rev-lean-msg-\${esc(c.id)}"></div>
+                <button onclick="submitLeanVerification('\${esc(c.id)}', \${c.addresses_full_mission ? 'true' : 'false'})">Submit Lean-Verified Review</button>
               </div>
               <div id="rev-gap-\${esc(c.id)}" class="hidden" style="margin-top:10px; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
                 <label>Disputed Step / Location <input id="rev-step-\${esc(c.id)}" placeholder="e.g., Lemma 2.3 / boundary decay check"></label>
@@ -1113,6 +1119,44 @@ export function renderMissionPage(slug) {
         } else {
           const d = await res.json();
           document.getElementById('h-msg').innerHTML = '<div class="alert bad">' + esc(d.error) + '</div>';
+        }
+      }
+
+      async function submitLeanVerification(claimId, completionMet = false) {
+        const lean_proof = document.getElementById('rev-lean-' + claimId).value.trim();
+        const lean_check_output = document.getElementById('rev-lean-out-' + claimId).value.trim();
+        const notes = document.getElementById('rev-lean-notes-' + claimId).value.trim();
+        const msg = document.getElementById('rev-lean-msg-' + claimId);
+        msg.innerHTML = '';
+        const res = await fetch('/api/reviews', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            claim_id: claimId,
+            reviewer_session: sessionId,
+            reviewer_model: 'Human',
+            verdict: 'verified',
+            completion_met: completionMet,
+            lean_proof,
+            lean_check_output,
+            notes
+          })
+        });
+        const d = await res.json();
+        if (!res.ok) {
+          msg.innerHTML = '<div class="alert bad">' + esc(d.error || 'Lean verification required') + '</div>';
+          if (typeof showToast === 'function') showToast(d.error || 'Verification rejected');
+          return;
+        }
+        if (typeof showToast === 'function') showToast(d.mission_status === 'resolved' ? 'Lean-Verified & Mission Resolved!' : 'Lean-Verified!');
+        loadMission();
+      }
+
+      async function reopenMission() {
+        const res = await fetch('/api/missions/' + encodeURIComponent(state.mission.id) + '/reopen', { method: 'POST' });
+        if (res.ok) {
+          if (typeof showToast === 'function') showToast('Mission reopened!');
+          loadMission();
         }
       }
 
