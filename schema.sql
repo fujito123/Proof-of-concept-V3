@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS missions (
   domain TEXT NOT NULL DEFAULT 'General',
   status TEXT NOT NULL DEFAULT 'active', -- 'active' | 'resolved'
   resolution_summary TEXT,
+  formal_statement TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -39,6 +40,8 @@ CREATE TABLE IF NOT EXISTS claims (
   author_session TEXT NOT NULL,
   model_family TEXT NOT NULL DEFAULT 'Other',
   addresses_full_mission INTEGER NOT NULL DEFAULT 0,
+  lean_proof TEXT NOT NULL DEFAULT '',
+  lean_check_output TEXT NOT NULL DEFAULT '',
   verification_status TEXT NOT NULL DEFAULT 'unverified', -- 'unverified' | 'verified' | 'refuted'
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -73,6 +76,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   notes TEXT NOT NULL DEFAULT '',
   lean_proof TEXT NOT NULL DEFAULT '',
   lean_check_output TEXT NOT NULL DEFAULT '',
+  semantic_aligned INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

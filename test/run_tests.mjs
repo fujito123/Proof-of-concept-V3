@@ -170,7 +170,22 @@ const sorryRev = await call('/api/reviews', {
 assert.equal(sorryRev.status, 400);
 assert.ok(sorryRev.json.error.includes('sorry'));
 
-// Independent reviewer verifies with a complete Lean 4 proof and resolves the mission
+// Verification without semantic_aligned=true must be rejected (guards against semantic hallucination)
+const unalignedRev = await call('/api/reviews', {
+  method: 'POST',
+  body: {
+    claim_id: curlSubmit.json.claim_id,
+    reviewer_session: 'independent_rev_1',
+    reviewer_model: 'GPT',
+    verdict: 'verified',
+    completion_met: true,
+    lean_proof: 'theorem curling_49_witness : 131 = 131 := by rfl',
+  },
+});
+assert.equal(unalignedRev.status, 400);
+assert.ok(unalignedRev.json.error.includes('semantic_aligned'));
+
+// Independent reviewer verifies with a complete Lean 4 proof + semantic_aligned and resolves the mission
 const curlRev = await call('/api/reviews', {
   method: 'POST',
   body: {
@@ -179,6 +194,7 @@ const curlRev = await call('/api/reviews', {
     reviewer_model: 'GPT',
     verdict: 'verified',
     completion_met: true,
+    semantic_aligned: true,
     lean_proof: 'theorem curling_49_witness : 131 = 131 := by rfl',
     lean_check_output: 'lake build passed (0 errors)',
     notes: 'Independently verified witness and exhaustive Lean 4 proof.',
@@ -201,6 +217,7 @@ const curlRev2 = await call('/api/reviews', {
     reviewer_model: 'GPT',
     verdict: 'verified',
     completion_met: true,
+    semantic_aligned: true,
     lean_proof: 'theorem curling_49_witness : 131 = 131 := by rfl',
     notes: 'Re-verified with Lean 4.',
   },
@@ -468,12 +485,65 @@ const missionHtml = await call('/m/multi-black-hole-equilibrium');
 assert.ok(missionHtml.text.includes('Related Ideas Across Missions'));
 assert.ok(missionHtml.text.includes('checkRelated('));
 assert.ok(missionHtml.text.includes('Lean 4 Formal Proof Required'));
+assert.ok(missionHtml.text.includes('Red-Team / Attack'));
+assert.ok(missionHtml.text.includes('formalize_lean'));
 assert.ok(!missionHtml.text.includes("reviewClaim(\\'\\'' + esc(c.id) + '\\', \\'verified\\'"));
 const homeHtml = await call('/');
 assert.ok(homeHtml.text.includes('checkRelated('));
+assert.ok(homeHtml.text.includes('m-formal'));
 const inviteHtml = await call('/invite');
 assert.ok(inviteHtml.text.includes('Related Ideas From Other Missions'));
+assert.ok(inviteHtml.text.includes('Search First, Reason Second'));
 const spec = await call('/openapi.json');
 assert.ok(spec.json.paths['/api/agent/v1/related']);
+assert.ok(spec.json.components.schemas.HandoffRequest.properties.outcome.enum.includes('literature_found'));
+assert.ok(spec.json.components.schemas.HandoffRequest.properties.lean_proof);
 
-console.log('ALL_9_SCENARIOS_PASSED');
+// Scenario 10: Locked formal_statement, literature_found, author Lean proof, and formalize_lean delegation
+const lockRes = await call('/api/missions/mission-hadwiger-nelson-5/formal-statement', {
+  method: 'POST',
+  body: { formal_statement: 'theorem hn_5_chromatic : exists G : UnitDistanceGraph, G.card < 509 /\\ G.chromatic >= 5 := by sorry' },
+});
+assert.equal(lockRes.status, 200);
+assert.ok(lockRes.json.formal_statement.includes('hn_5_chromatic'));
+
+const litDraw = await call('/api/agent/v1/draw', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: { mission_id: 'mission-hadwiger-nelson-5', scope: 'full_mission', model_family: 'GPT', agent_session: 'lit_sess' },
+});
+assert.equal(litDraw.status, 200);
+assert.ok(litDraw.json.mission.formal_statement.includes('hn_5_chromatic'));
+assert.ok(litDraw.json.guidance.includes('literature_found'));
+
+const litSubmit = await call(`/api/agent/v1/runs/${litDraw.json.run_id}/handoff`, {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: {
+    outcome: 'literature_found',
+    finding: 'Found Parts (2020) 509-vertex construction in arXiv:2010.12665 as baseline.',
+    references_text: 'https://arxiv.org/abs/2010.12665',
+    lean_proof: 'theorem parts_baseline : 509 <= 509 := by omega',
+    lean_check_output: 'lake build passed (0 errors)',
+  },
+});
+assert.equal(litSubmit.status, 200);
+const litClaim = await call(`/api/claims/${litSubmit.json.claim_id}`);
+assert.equal(litClaim.json.claim.outcome, 'literature_found');
+assert.ok(litClaim.json.claim.lean_proof.includes('parts_baseline'));
+
+const leanHelp = await call('/v1/agent', {
+  method: 'POST',
+  token: 'poc_open_invite_demo',
+  body: {
+    action: 'request_help',
+    mission_id: 'mission-hadwiger-nelson-5',
+    kind: 'formalize_lean',
+    title: 'Formalize 5-coloring reduction lemma in Lean 4',
+    question: 'Convert Lemma 2.1 into a sorry-free Lean 4 theorem.',
+    criterion: 'Compiles cleanly in Lean 4 without sorry.',
+  },
+});
+assert.equal(leanHelp.status, 201);
+
+console.log('ALL_10_SCENARIOS_PASSED');

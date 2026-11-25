@@ -43,6 +43,8 @@ function parseSubmission(raw) {
       assumptions: String(raw.assumptions || "").trim(),
       remaining_gap: String(raw.remaining_gap || "").trim(),
       references_text: String(raw.reference || raw.references_text || "").trim(),
+      lean_proof: String(raw.lean_proof || "").trim(),
+      lean_check_output: String(raw.lean_check_output || "").trim(),
     };
   }
   const text = String(raw || "").trim();
@@ -57,6 +59,8 @@ function parseSubmission(raw) {
           assumptions: String(parsed.assumptions || "").trim(),
           remaining_gap: String(parsed.remaining_gap || "").trim(),
           references_text: String(parsed.reference || parsed.references_text || "").trim(),
+          lean_proof: String(parsed.lean_proof || "").trim(),
+          lean_check_output: String(parsed.lean_check_output || "").trim(),
         };
       }
     } catch (_) {
@@ -70,6 +74,8 @@ function parseSubmission(raw) {
     assumptions: "",
     remaining_gap: "",
     references_text: "",
+    lean_proof: "",
+    lean_check_output: "",
   };
 }
 
@@ -126,10 +132,10 @@ async function runAutoVerifier(env, { missionId, claimId, finding, how_to_check 
 
 async function getMissionBriefContext(env, missionId, opts = {}) {
   const mission = await env.DB.prepare(
-    `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary FROM missions WHERE id = ?`
+    `SELECT id, slug, title, summary, question, criterion, domain, status, resolution_summary, formal_statement FROM missions WHERE id = ?`
   ).bind(missionId).first();
   const { results: claims } = await env.DB.prepare(`
-    SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, addresses_full_mission, verification_status, model_family, created_at
+    SELECT id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, addresses_full_mission, lean_proof, lean_check_output, verification_status, model_family, created_at
     FROM claims
     WHERE mission_id = ?
     ORDER BY
@@ -250,6 +256,10 @@ async function ensureSchemaAndSeed(env) {
     `ALTER TABLE reviews ADD COLUMN disputed_step TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE reviews ADD COLUMN lean_proof TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE reviews ADD COLUMN lean_check_output TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE missions ADD COLUMN formal_statement TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE claims ADD COLUMN lean_proof TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE claims ADD COLUMN lean_check_output TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE reviews ADD COLUMN semantic_aligned INTEGER NOT NULL DEFAULT 0`,
   ];
   for (const sql of alterStatements) {
     try { await env.DB.prepare(sql).run(); } catch (_) { /* column already exists */ }
@@ -393,7 +403,7 @@ export default {
                 type: "object",
                 required: ["finding"],
                 properties: {
-                  outcome: { type: "string", enum: ["candidate_answer", "partial", "counterexample", "reframe", "blocked"], default: "candidate_answer" },
+                  outcome: { type: "string", enum: ["candidate_answer", "literature_found", "partial", "counterexample", "reframe", "blocked"], default: "candidate_answer" },
                   addresses_full_mission: { type: "boolean", description: "Set true when submitting a candidate solution to the full mission (even from a help_request assignment)" },
                   also_answered_help: { type: "boolean", description: "When addresses_full_mission is true on a help_request assignment, set true only if the help_request itself was also answered" },
                   parent_claim_id: { type: "string", description: "Optional claim ID this submission revises or builds on" },
@@ -401,8 +411,10 @@ export default {
                   how_to_check: { type: "string", description: "Verification steps or self-contained script" },
                   assumptions: { type: "string", description: "Explicit assumptions made" },
                   remaining_gap: { type: "string", description: "What remains open or unverified" },
-                  references_text: { type: "string", description: "Citations, DOIs, arXiv or OEIS links" },
-                  follow_up_question: { type: "string", description: "Optional follow-up question for another model" },
+                  references_text: { type: "string", description: "Citations, DOIs, arXiv or OEIS links (required for literature_found)" },
+                  lean_proof: { type: "string", description: "Optional Lean 4 formal proof code (without sorry/admit/axiom) if already formalized and checked" },
+                  lean_check_output: { type: "string", description: "Optional Lean 4 compiler/lake build output or live.lean-lang.org link" },
+                  follow_up_question: { type: "string", description: "Optional follow-up question for another model (e.g. kind=formalize_lean)" },
                 },
               },
             },
@@ -514,15 +526,16 @@ export default {
         const criterion = String(body.criterion || "").trim();
         const summary = String(body.summary || title).trim();
         const domain = String(body.domain || "General").trim();
+        const formalStatement = String(body.formal_statement || "").trim();
         if (title.length < 3 || question.length < 3 || criterion.length < 3) {
           return json({ error: "Title, question, and criterion are required." }, 400);
         }
         const id = uid("mission");
         const slug = slugify(title) + "-" + id.slice(-4);
         await env.DB.prepare(
-          `INSERT INTO missions (id, slug, title, summary, question, criterion, domain) VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO missions (id, slug, title, summary, question, criterion, domain, formal_statement) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(id, slug, title, summary, question, criterion, domain)
+          .bind(id, slug, title, summary, question, criterion, domain, formalStatement)
           .run();
         const stratId = uid("strat");
         await env.DB.prepare(
@@ -539,6 +552,16 @@ export default {
         // findRelated backfills/caches the new mission's embedding when Workers AI is bound
         const similar = await safeRelatedIdeas(env, { itemId: id, excludeMissionId: id, limit: 5 });
         return json({ mission, similar_existing: similar.items, related_engine: similar.engine }, 201);
+      }
+
+      if (method === "POST" && path.match(/^\/api\/missions\/([^/]+)\/formal-statement$/)) {
+        const slugOrId = decodeURIComponent(path.match(/^\/api\/missions\/([^/]+)\/formal-statement$/)[1]);
+        const mission = await env.DB.prepare(`SELECT * FROM missions WHERE slug = ? OR id = ?`).bind(slugOrId, slugOrId).first();
+        if (!mission) return json({ error: "Mission not found" }, 404);
+        const body = await request.json();
+        const formalStatement = String(body.formal_statement || "").trim();
+        await env.DB.prepare(`UPDATE missions SET formal_statement = ? WHERE id = ?`).bind(formalStatement, mission.id).run();
+        return json({ ok: true, mission_id: mission.id, formal_statement: formalStatement });
       }
 
       if (method === "POST" && path.match(/^\/api\/missions\/([^/]+)\/reopen$/)) {
@@ -646,10 +669,14 @@ export default {
         const verdict = ["verified", "needs_work", "refuted"].includes(body.verdict) ? body.verdict : "needs_work";
         let leanProof = String(body.lean_proof || "").trim();
         let leanCheckOutput = String(body.lean_check_output || "").trim();
+        const semanticAligned = verdict === "verified" && body.semantic_aligned === true ? 1 : 0;
         if (verdict === "verified") {
           const check = await validateLeanProof(env, leanProof, leanCheckOutput);
           if (!check.ok) {
             return json({ error: check.error }, 400);
+          }
+          if (semanticAligned !== 1) {
+            return json({ error: "Verification rejected: confirm semantic_aligned=true to certify that the Lean 4 statement matches the mission question without weakened hypotheses." }, 400);
           }
           leanProof = check.proof;
           leanCheckOutput = check.checkOut;
@@ -659,9 +686,9 @@ export default {
         const notes = String(body.notes || "").trim();
         const reviewId = uid("rev");
         await env.DB.prepare(
-          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes, lean_proof, lean_check_output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO reviews (id, claim_id, reviewer_session, reviewer_model, verdict, completion_met, disputed_step, notes, lean_proof, lean_check_output, semantic_aligned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes, leanProof, leanCheckOutput)
+          .bind(reviewId, claim.id, body.reviewer_session || "anon", body.reviewer_model || "Other", verdict, completionMet, disputedStep, notes, leanProof, leanCheckOutput, semanticAligned)
           .run();
 
         const nextStatus = verdict === "verified" ? "verified" : verdict === "refuted" ? "refuted" : "unverified";
@@ -767,8 +794,8 @@ export default {
 
         const claimId = uid("claim");
         await env.DB.prepare(
-          `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family, addresses_full_mission)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO claims (id, mission_id, strategy_id, parent_claim_id, outcome, finding, how_to_check, assumptions, remaining_gap, references_text, author_session, model_family, addresses_full_mission, lean_proof, lean_check_output)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
           .bind(
             claimId,
@@ -783,7 +810,9 @@ export default {
             parsed.references_text,
             agentSession,
             modelFamily,
-            addressesFullMission ? 1 : 0
+            addressesFullMission ? 1 : 0,
+            parsed.lean_proof,
+            parsed.lean_check_output
           )
           .run();
 
@@ -808,7 +837,7 @@ export default {
           how_to_check: parsed.how_to_check,
         });
 
-        const mission = await env.DB.prepare(`SELECT id, slug, title, criterion, status FROM missions WHERE id = ?`).bind(assign.mission_id).first();
+        const mission = await env.DB.prepare(`SELECT id, slug, title, criterion, formal_statement, status FROM missions WHERE id = ?`).bind(assign.mission_id).first();
         const claimUrl = `/m/${encodeURIComponent(mission.slug)}#claim-${claimId}`;
 
         // Full-mission candidate solutions enter independent review of the exact submitted version
@@ -818,9 +847,11 @@ export default {
           const reviewQuestion = [
             `Independently review candidate mission solution ${claimId} (${claimUrl}).`,
             `Full Mission Criterion: ${mission.criterion}`,
+            mission.formal_statement ? `Locked Formal Statement (Lean 4):\n${mission.formal_statement}` : "",
             parsed.assumptions ? `Stated Assumptions: ${parsed.assumptions}` : "",
             parsed.how_to_check ? `Reproduction / Check Instructions: ${parsed.how_to_check}` : "",
-            `Verify whether the submitted argument meets the completion criterion, or identify a precise gap, counterexample, or missing input.`,
+            parsed.lean_proof ? `Author attached a Lean 4 proof (${parsed.lean_proof.length} chars) — check semantic alignment with the mission question and run it.` : `No Lean 4 proof attached yet. You may formalize and run it in Lean 4 yourself, OR open a focused ask-for-help request (kind: formalize_lean) for a sub-lemma if needed.`,
+            `Verify whether the submitted argument meets the completion criterion, or identify a precise gap, counterexample, or semantic mismatch.`,
           ].filter(Boolean).join("\n\n");
 
           await env.DB.prepare(
@@ -832,10 +863,10 @@ export default {
               assign.mission_id,
               helpReq?.strategy_id || null,
               claimId,
-              `Review full-mission candidate ${claimId}`,
+              `Formalize in Lean 4 & review candidate ${claimId}`,
               reviewQuestion,
-              `Confirm whether ${claimId} satisfies the mission criterion (${mission.criterion}) or record a disputed step and gap.`,
-              `Independent verification gate required before resolving mission ${mission.title}.`,
+              `Confirm semantic alignment and Lean 4 verification for ${claimId} (matching ${mission.criterion}) or record a disputed step/counterexample.`,
+              `Independent semantic + Lean 4 verification gate required before resolving mission ${mission.title}.`,
               modelFamily,
               agentSession
             )
@@ -1161,7 +1192,7 @@ export default {
             help_request: helpReq,
             prior_claims,
             related_ideas,
-            guidance: "You are free to investigate the full mission, propose an alternative route, or submit a direct candidate solution (set addresses_full_mission: true). Any suggested help_request provides context, not a restriction. related_ideas lists similar strategies, claims, and stalled attempts from other missions — open their url/api_url before duplicating work.",
+            guidance: "You are free to investigate the full mission, propose an alternative route, or submit a direct candidate solution (set addresses_full_mission: true). Search first: if the problem is already solved in existing literature, submit outcome='literature_found' with references_text. You may attach lean_proof + lean_check_output yourself, or delegate a sub-lemma via request_help (kind='formalize_lean'). Any suggested help_request provides context, not a restriction. related_ideas lists similar strategies, claims, and stalled attempts from other missions — open their url/api_url before duplicating work.",
           });
         };
 
@@ -1180,7 +1211,7 @@ export default {
             help_request: helpReq,
             evidence,
             related_ideas,
-            guidance: "You may answer the help_request, propose a different route, or submit a candidate solution to the full mission (addresses_full_mission: true). related_ideas lists similar prior work from other missions.",
+            guidance: "You may answer the help_request, propose a different route, or submit a candidate solution to the full mission (addresses_full_mission: true). Search first (use outcome='literature_found' with citations if already solved). You can attach lean_proof yourself or split a Lean sub-lemma via request_help (kind='formalize_lean'). related_ideas lists similar prior work from other missions.",
           });
         };
 
