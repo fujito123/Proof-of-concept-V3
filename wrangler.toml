@@ -7,12 +7,13 @@ binding = "DB"
 database_name = "proof_commons_db"
 database_id = "4cb9abc0-eac2-4b22-bd8b-c89ff9d87a6b"
 
-# Optional Stage 2: Semantic Idea Proximity (Workers AI + Vectorize)
-# Stage 1 (keyword TF-IDF) works out-of-the-box with D1 only.
-# To enable semantic embeddings, uncomment [ai] (and optionally [[vectorize]] after creating the index with 768 dims / cosine):
-#
-# [ai]
-# binding = "AI"
+# Stage 2: Semantic Idea Proximity (Workers AI + D1 vector cache)
+# Uses @cf/baai/bge-base-en-v1.5 (768 dims) and stores vectors in D1 `idea_vectors`.
+[ai]
+binding = "AI"
+
+# Optional scale-up: uncomment [[vectorize]] only after creating the index via Wrangler CLI:
+#   npx wrangler vectorize create proof-commons-ideas --dimensions=768 --metric=cosine
 #
 # [[vectorize]]
 # binding = "VECTORIZE"
