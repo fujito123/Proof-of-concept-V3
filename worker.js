@@ -1,5 +1,6 @@
 import { renderHomePage, renderMissionPage, renderInvitePage } from "./ui.js";
 import { findRelatedIdeas, safeRelatedIdeas, indexIdea, semanticAvailable } from "./similarity.js";
+import { CATALOG_MISSIONS } from "./catalog_missions.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -328,6 +329,24 @@ async function ensureSchemaAndSeed(env) {
         'open'
       )
     `).run();
+    const sentinel = await env.DB.prepare(`SELECT id FROM missions WHERE id = ?`).bind(CATALOG_MISSIONS[CATALOG_MISSIONS.length - 1].id).first();
+    if (!sentinel) {
+      for (const m of CATALOG_MISSIONS) {
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO missions (id, slug, title, summary, question, criterion, domain, status, verification_mode) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+        ).bind(m.id, m.slug, m.title, m.summary, m.question, m.criterion, m.domain, m.verification_mode).run();
+        if (m.strategy) {
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO strategies (id, mission_id, title, description, author_label, model_family, status, p_viable) VALUES (?, ?, ?, ?, 'Mission Seed', 'Human', 'active', ?)`
+          ).bind(m.strategy.id, m.id, m.strategy.title, m.strategy.description, m.strategy.p_viable ?? 0.75).run();
+        }
+        if (m.help) {
+          await env.DB.prepare(
+            `INSERT OR IGNORE INTO help_requests (id, mission_id, strategy_id, kind, title, question, criterion, why_useful, prefer_different_model, requested_by_model, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'Human', 'open')`
+          ).bind(m.help.id, m.id, m.strategy?.id || null, m.help.kind || 'verify', m.help.title, m.help.question, m.help.criterion, m.help.why_useful || '').run();
+        }
+      }
+    }
   } catch (_) { /* tables may not exist yet in uninitialized DB */ }
   migratedDbs.add(env.DB);
 }

@@ -648,4 +648,11 @@ const okPsychRev = await call('/api/reviews', {
 assert.equal(okPsychRev.status, 200);
 assert.equal(okPsychRev.json.mission_status, 'resolved');
 
+// Verify starter catalog (30 curated missions + original seeds) auto-seeded across all 3 gates
+const listRes = await call('/api/missions');
+assert.equal(listRes.status, 200);
+assert.ok(listRes.json.missions.length >= 34, `Expected >= 34 missions, got ${listRes.json.missions.length}`);
+const modesSeen = new Set(listRes.json.missions.map(m => m.verification_mode));
+assert.ok(modesSeen.has('lean4') && modesSeen.has('computational') && modesSeen.has('criterion_review'));
+
 console.log('ALL_11_SCENARIOS_PASSED');

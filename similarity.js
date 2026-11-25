@@ -14,7 +14,7 @@
 
 export const EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
 const MAX_EMBED_CHARS = 1500;
-const BACKFILL_BATCH = 24;
+const BACKFILL_BATCH = 48;
 const SEMANTIC_FLOOR = 0.45; // cosine below this is treated as "unrelated" for bge-style models
 const SEMANTIC_WEIGHT = 0.7;
 const MIN_KEYWORD_SCORE = 0.07;

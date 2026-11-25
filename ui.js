@@ -721,7 +721,18 @@ export function renderHomePage() {
         <button class="tab-btn" id="tab-resolved" onclick="switchTab('resolved')" data-i18n="tab_resolved">Resolved</button>
         <button class="tab-btn" id="tab-ask" onclick="switchTab('ask')" data-i18n="tab_ask">+ Ask Open Question</button>
       </div>
-      <input class="search-input" id="mission-search" oninput="renderList()" data-i18n-ph="search_ph" placeholder="Search missions or domain...">
+      <div class="row" style="flex:1; justify-content:flex-end; gap:8px;">
+        <select id="mission-domain-filter" onchange="renderList()" style="width:auto; min-width:140px; padding:8px 10px;">
+          <option value="">All Domains</option>
+        </select>
+        <select id="mission-mode-filter" onchange="renderList()" style="width:auto; min-width:140px; padding:8px 10px;">
+          <option value="">All Gates</option>
+          <option value="lean4">Lean 4 Proof</option>
+          <option value="computational">Code / Playtest</option>
+          <option value="criterion_review">Peer Review</option>
+        </select>
+        <input class="search-input" id="mission-search" oninput="renderList()" data-i18n-ph="search_ph" placeholder="Search missions or domain...">
+      </div>
     </div>
 
     <div id="missions-list" class="missions-grid"><p class="muted">Loading missions...</p></div>
@@ -757,8 +768,17 @@ export function renderHomePage() {
         const res = await fetch('/api/missions');
         const data = await res.json();
         allMissions = data.missions || [];
+        populateDomainFilter();
         updateHeroStats();
         renderList();
+      }
+
+      function populateDomainFilter() {
+        const sel = document.getElementById('mission-domain-filter');
+        if (!sel) return;
+        const domains = Array.from(new Set(allMissions.map(m => m.domain).filter(Boolean))).sort();
+        sel.innerHTML = '<option value="">All Domains (' + domains.length + ')</option>' +
+          domains.map(dom => '<option value="' + esc(dom) + '">' + esc(dom) + '</option>').join('');
       }
 
       function updateHeroStats() {
@@ -784,12 +804,16 @@ export function renderHomePage() {
 
       function renderList() {
         const q = (document.getElementById('mission-search')?.value || '').trim().toLowerCase();
+        const domFilter = document.getElementById('mission-domain-filter')?.value || '';
+        const modeFilter = document.getElementById('mission-mode-filter')?.value || '';
         const lang = typeof getLang === 'function' ? getLang() : 'en';
         const d = (typeof DICT !== 'undefined' && DICT[lang]) ? DICT[lang] : { btn_explore: 'Explore Argument Tree', btn_contribute: 'Contribute with AI' };
 
         const filtered = allMissions.filter(m => {
           const tabOk = currentTab === 'resolved' ? m.status === 'resolved' : m.status !== 'resolved';
           if (!tabOk) return false;
+          if (domFilter && m.domain !== domFilter) return false;
+          if (modeFilter && (m.verification_mode || 'criterion_review') !== modeFilter) return false;
           if (!q) return true;
           return (m.title + ' ' + m.summary + ' ' + m.domain).toLowerCase().includes(q);
         });
@@ -799,12 +823,18 @@ export function renderHomePage() {
           el.innerHTML = '<div class="card muted-card" style="grid-column:1/-1;text-align:center;"><p class="muted" style="margin:0;">No matching missions in this tab yet.</p></div>';
           return;
         }
-        el.innerHTML = filtered.map(m => \`
+        el.innerHTML = filtered.map(m => {
+          const mode = m.verification_mode || 'criterion_review';
+          const modeLabel = mode === 'lean4' ? 'Lean 4' : (mode === 'computational' ? 'Code / Playtest' : 'Peer Review');
+          return \`
           <div class="card">
             <div>
               <div class="row" style="justify-content:space-between; margin-bottom:10px;">
-                <span class="badge primary">\${esc(m.domain)}</span>
-                <span class="badge \${(m.open_help_count || 0) > 0 ? 'warn' : 'ok'}">\${m.open_help_count || 0} open tasks · \${m.claim_count || 0} findings</span>
+                <div class="row" style="gap:6px;">
+                  <span class="badge primary">\${esc(m.domain)}</span>
+                  <span class="badge">\${esc(modeLabel)}</span>
+                </div>
+                <span class="badge \${(m.open_help_count || 0) > 0 ? 'warn' : 'ok'}">\${m.open_help_count || 0} open · \${m.claim_count || 0} findings</span>
               </div>
               <h3 style="font-size:17.5px; margin-bottom:8px;">
                 <a href="/m/\${encodeURIComponent(m.slug)}" style="color:var(--text);">\${esc(m.title)}</a>
@@ -813,10 +843,10 @@ export function renderHomePage() {
             </div>
             <div class="row" style="margin-top:auto; padding-top:12px; border-top:1px solid var(--border);">
               <a class="btn" style="flex:1;" href="/m/\${encodeURIComponent(m.slug)}">\${esc(d.btn_explore)}</a>
-              <a class="btn secondary" href="/invite#poc_open_invite_demo">\${esc(d.btn_contribute)}</a>
+              <a class="btn secondary" href="/invite?mission_id=\${encodeURIComponent(m.id)}#poc_open_invite_demo">\${esc(d.btn_contribute)}</a>
             </div>
           </div>
-        \`).join('');
+        \`;}).join('');
       }
 
       async function createMission() {
